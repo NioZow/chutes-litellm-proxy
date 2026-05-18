@@ -1,0 +1,15 @@
+[Unit]
+Description=LiteLLM proxy
+
+[Service]
+Type=simple
+ExecStart=/path/to/your/run.sh BIND=127.0.0.1:4000
+# Add secret args to ExecStart, e.g.:
+# ExecStart=/path/to/your/run.sh BIND=127.0.0.1:4000 MY_SECRET=/path/to/secret/file
+Restart=on-failure
+RestartSec=5
+# You may add proxy env variables too
+# Environment=RUNTIME=podman
+
+[Install]
+WantedBy=default.target

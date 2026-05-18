@@ -1,0 +1,41 @@
+model_list:
+  - model_name: "anthropic/*"
+    litellm_params:
+      model: "anthropic/*"
+      api_key: "os.environ/ANTHROPIC_API_KEY"
+
+  - model_name: "openai/*"
+    litellm_params:
+      model: "openai/*"
+      api_key: "os.environ/OPENAI_API_KEY"
+
+  - model_name: "gemini/*"
+    litellm_params:
+      model: "gemini/*"
+      api_key: "os.environ/GEMINI_API_KEY"
+
+  - model_name: "perplexity/*"
+    litellm_params:
+      model: "perplexity/*"
+      api_key: "os.environ/PERPLEXITY_API_KEY"
+
+  - model_name: "xai/*"
+    litellm_params:
+      model: "xai/*"
+      api_key: "os.environ/XAI_API_KEY"
+
+  - model_name: "chutes-e2ee/*"
+    litellm_params:
+      model: "chutes-e2ee/*"
+      api_key: "os.environ/CHUTES_API_KEY"
+
+general_settings:
+  # no authentication required
+  master_key: null
+
+litellm_settings:
+  custom_provider_map:
+    - {
+        "provider": "chutes-e2ee",
+        "custom_handler": "chutes_provider.chutes_e2ee_provider",
+      }
