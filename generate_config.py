@@ -24,6 +24,20 @@ def log(msg: str) -> None:
 # Per-provider fetch functions — return list of bare model IDs
 
 
+# Blacklists — models matching these prefixes are dropped.
+SKIP_OPENAI = {
+    "text-embedding",
+    "text-moderation",
+    "omni-moderation",
+    "babbage",
+    "davinci",
+}
+
+SKIP_GEMINI = {
+    "embedding",
+}
+
+
 def fetch_anthropic(api_key: str) -> list[str]:
     r = httpx.get(
         "https://api.anthropic.com/v1/models",
@@ -42,9 +56,7 @@ def fetch_openai(api_key: str) -> list[str]:
     )
     r.raise_for_status()
     all_ids = [m["id"] for m in r.json()["data"]]
-    # Filter to chat/reasoning models; exclude embeddings, tts, dall-e, whisper, etc.
-    keep = ("gpt-4", "gpt-3.5-turbo", "o1", "o3", "o4", "chatgpt-4o")
-    return sorted(m for m in all_ids if any(m.startswith(p) for p in keep))
+    return sorted(m for m in all_ids if not any(m.startswith(p) for p in SKIP_OPENAI))
 
 
 def fetch_gemini(api_key: str) -> list[str]:
@@ -54,12 +66,11 @@ def fetch_gemini(api_key: str) -> list[str]:
         timeout=TIMEOUT,
     )
     r.raise_for_status()
-    models = []
-    for m in r.json().get("models", []):
-        if "generateContent" in m.get("supportedGenerationMethods", []):
-            # "models/gemini-2.0-flash" -> "gemini-2.0-flash"
-            models.append(m["name"].removeprefix("models/"))
-    return sorted(models)
+    all_ids = [
+        m["name"].removeprefix("models/")
+        for m in r.json().get("models", [])
+    ]
+    return sorted(m for m in all_ids if not any(m.startswith(p) for p in SKIP_GEMINI))
 
 
 def fetch_chutes(api_key: str) -> list[str]:
