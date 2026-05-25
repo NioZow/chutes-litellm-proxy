@@ -38,7 +38,7 @@ from pathlib import Path
 
 import requests
 
-LITELLM_BASE = "http://litellm-proxy:4000"
+LITELLM_BASE = "http://127.0.0.1:27740"
 CHUTES_BASE = "https://llm.chutes.ai"
 OPENCODE_CONFIG = Path.home() / ".config/opencode/opencode.jsonc"
 
@@ -120,11 +120,13 @@ def fetch_chutes_model_info(api_key: str) -> dict[str, dict]:
         return {}
 
 
-def find_chutes_limits(model_id: str, chutes_map: dict[str, dict]) -> tuple[int | None, int | None]:
+def find_chutes_limits(
+    model_id: str, chutes_map: dict[str, dict]
+) -> tuple[int | None, int | None]:
     """Look up context/output limits for a chutes-e2ee/* model from Chutes /v1/models data."""
     if not chutes_map or not model_id.startswith("chutes-e2ee/"):
         return None, None
-    chutes_id = model_id[len("chutes-e2ee/"):]  # e.g. "moonshotai/Kimi-K2.6-TEE"
+    chutes_id = model_id[len("chutes-e2ee/") :]  # e.g. "moonshotai/Kimi-K2.6-TEE"
     info = chutes_map.get(chutes_id, {})
     return info.get("context_length"), info.get("max_output_length")
 
@@ -152,7 +154,9 @@ def load_opencode_config(path: Path | None = None) -> tuple[dict, dict[str, str]
         return {}, {}
     raw = target.read_text()
     try:
-        cfg = json.loads(strip_jsonc_comments(raw) if target.suffix == ".jsonc" else raw)
+        cfg = json.loads(
+            strip_jsonc_comments(raw) if target.suffix == ".jsonc" else raw
+        )
     except json.JSONDecodeError as e:
         print(f"Warning: could not parse {target}: {e}", file=sys.stderr)
         return {}, {}
@@ -224,6 +228,10 @@ def build_entry(
         temperature = "temperature" in params
     else:
         temperature = True  # unknown → assume supported
+
+    # Special case: GPT-5 models do not support temperature
+    if "gpt-5" in model_id.lower():
+        temperature = False
 
     # attachment (vision): conservative — only True when explicitly stated
     attachment = info.get("supports_vision") is True
@@ -343,7 +351,9 @@ def build_models_block(
                 print(f"  skip {mid}: {skip_reason}", file=sys.stderr)
             continue
 
-        entry = build_entry(mid, info, existing=existing_models.get(mid), chutes_map=chutes_map)
+        entry = build_entry(
+            mid, info, existing=existing_models.get(mid), chutes_map=chutes_map
+        )
         # Restore manually set name if present
         if mid in name_overrides:
             entry["name"] = name_overrides[mid]
