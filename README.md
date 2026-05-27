@@ -260,6 +260,10 @@ Requires the proxy to be running. Tests both non-streaming and streaming:
 Chutes uses end-to-end encrypted transport. `chutes_provider.py` wraps the standard OpenAI client with a custom HTTPX transport that handles encryption transparently. The
 `chutes-e2ee-transport` package is installed in the image at build time.
 
+## Open WebUI
+
+You can start the litellm-proxy and open-webui using the `docker-compose.yml`. From the open-webui settings, you can then add this `http://litellm:4000/v1` to you OpenAI API Connections.
+
 ## Structure
 
 ```

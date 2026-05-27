@@ -1,0 +1,18 @@
+services:
+  litellm:
+    build: .
+    container_name: litellm
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm-data:/app/data
+    environment:
+      - CHUTES_API_KEY=${CHUTES_API_KEY}
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "3000:8080"
+    volumes:
+      - ./openwebui-data:/app/backend/data
