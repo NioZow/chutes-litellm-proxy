@@ -262,7 +262,7 @@ Chutes uses end-to-end encrypted transport. `chutes_provider.py` wraps the stand
 
 ## Open WebUI
 
-You can start the litellm-proxy and open-webui using the `docker-compose.yml`. From the open-webui settings, you can then add this `http://litellm:4000/v1` to you OpenAI API Connections.
+You can also start the litellm proxy along with an open-webui container using docker compose. In the open-webui settings, it should then possible to add `http://litellm:4000/v1` to your OpenAI API Connections.
 
 ## Structure
 
