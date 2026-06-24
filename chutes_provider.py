@@ -52,6 +52,7 @@ from litellm.types.utils import (
     GenericStreamingChunk,
     ImageResponse,
     ModelResponse,
+    ModelResponseStream,
 )
 from openai import OpenAI
 
@@ -99,36 +100,88 @@ def _client(api_key: str) -> OpenAI:
         return client
 
 
+def _dump(obj: Any) -> dict[str, Any]:
+    if isinstance(obj, dict):
+        return dict(obj)
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    raise TypeError(f"Unsupported response object type: {type(obj)!r}")
+
+
+def _normalize_reasoning_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    reasoning = payload.pop("reasoning", None)
+    if payload.get("reasoning_content") is None and reasoning is not None:
+        payload["reasoning_content"] = reasoning
+    return payload
+
+
+def _normalize_response_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    for choice in payload.get("choices", []):
+        if not isinstance(choice, dict):
+            continue
+        for field in ("delta", "message"):
+            part = choice.get(field)
+            if part is None:
+                continue
+            choice[field] = _normalize_reasoning_fields(_dump(part))
+    return payload
+
+
+def _to_model_response(response: Any) -> ModelResponse:
+    return ModelResponse(**_normalize_response_payload(_dump(response)))
+
+
+def _to_original_chunk(payload: dict[str, Any]) -> ModelResponseStream:
+    return ModelResponseStream(**payload)
+
+
 def _to_chunk(chunk: Any) -> GenericStreamingChunk:
-    choice = chunk.choices[0] if chunk.choices else None
-    delta = choice.delta if choice else None
+    payload = _normalize_response_payload(_dump(chunk))
+    choice = payload["choices"][0] if payload.get("choices") else None
+    delta = choice.get("delta") if isinstance(choice, dict) else None
 
     tool_use: ChatCompletionToolCallChunk | None = None
-    if delta and delta.tool_calls:
-        tc = delta.tool_calls[0]
-        # ChatCompletionToolCallFunctionChunk has total=False so all keys optional.
+    if isinstance(delta, dict) and delta.get("tool_calls"):
+        tc = delta["tool_calls"][0]
         func: ChatCompletionToolCallFunctionChunk = {}
-        if tc.function:
-            if tc.function.name is not None:
-                func["name"] = tc.function.name
-            if tc.function.arguments is not None:
-                func["arguments"] = tc.function.arguments
-        # ChatCompletionToolCallChunk has total=True; all four fields are required.
-        # type is Literal["function"] — the only valid value for tool calls.
+        tc_function = tc.get("function")
+        if isinstance(tc_function, dict):
+            if tc_function.get("name") is not None:
+                func["name"] = tc_function["name"]
+            if tc_function.get("arguments") is not None:
+                func["arguments"] = tc_function["arguments"]
         tool_use = ChatCompletionToolCallChunk(
-            id=tc.id,
+            id=tc.get("id"),
             type="function",
             function=func,
-            index=tc.index,
+            index=tc.get("index", 0),
         )
 
+    content = delta.get("content") or "" if isinstance(delta, dict) else ""
+    reasoning = delta.get("reasoning_content") or "" if isinstance(delta, dict) else ""
+    finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+    is_finished = bool(finish_reason)
+
+    provider_specific_fields: dict[str, Any] | None = None
+    if reasoning:
+        # Older LiteLLM custom-provider streaming requires a GenericStreamingChunk,
+        # but if `original_chunk` is present it reconstructs the real OpenAI-style
+        # delta from there. Keep provider_specific_fields non-empty so reasoning-only
+        # chunks are considered non-empty and make it to that reconstruction path.
+        provider_specific_fields = {"reasoning_content": reasoning}
+
+    usage = payload.get("usage")
     return GenericStreamingChunk(
-        text=(delta.content or "") if delta else "",
+        text=content,
         tool_use=tool_use,
-        is_finished=bool(choice and choice.finish_reason),
-        finish_reason=(choice.finish_reason or "") if choice else "stop",
-        usage=chunk.usage.__dict__ if chunk.usage else None,
-        index=0,
+        is_finished=is_finished,
+        finish_reason=finish_reason or "stop",
+        usage=usage,
+        index=choice.get("index", 0) if isinstance(choice, dict) else 0,
+        provider_specific_fields=provider_specific_fields,
+        original_chunk=_to_original_chunk(payload),
     )
 
 
@@ -172,7 +225,7 @@ class ChutesE2EEProvider(CustomLLM):
                     params.pop(bad, None)
                 else:
                     raise
-        return litellm.ModelResponse(**response.model_dump())
+        return _to_model_response(response)
 
     def streaming(self, *_: Any, **kwargs: Any) -> Iterator[GenericStreamingChunk]:
         params = _clean(kwargs.get("optional_params", {}), drop_stream=True)
