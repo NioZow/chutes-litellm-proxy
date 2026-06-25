@@ -5,6 +5,7 @@
 #   - run.sh BIND=0.0.0.0:4000 OPENAI_API_KEY=/tmp/openai_api_key
 # note: also reads the runtime from the "RUNTIME" env variable -> podman | docker | auto
 # note: if no interface is specified `127.0.0.1:4000:4000`
+# note: also add all env variables like "*_API_KEY" to the container.
 set -eu
 
 RUNTIME=${RUNTIME:-auto}
@@ -33,6 +34,12 @@ for pair in "$@"; do
     printf '%s=%s\n' "${KEY}" "$(cat "${VALUE}")" >>"$TMPENV"
   fi
 done
+
+while IFS='=' read -r env_key env_val; do
+  if [[ "$env_key" == *_API_KEY ]]; then
+    printf '%s=%s\n' "$env_key" "$env_val" >>"$TMPENV"
+  fi
+done < <(env)
 
 if [[ ${#PUBLISH_ARGS[@]} -eq 0 ]]; then
   # default interface
