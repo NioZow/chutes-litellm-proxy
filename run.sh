@@ -11,7 +11,6 @@ set -eu
 RUNTIME=${RUNTIME:-auto}
 IMAGE_NAME="litellm-proxy"
 CONTAINER_NAME="$IMAGE_NAME"
-NETWORK_NAME="${IMAGE_NAME}_net"
 
 TMPENV=$(mktemp)
 trap 'rm -f "$TMPENV"' EXIT
@@ -46,14 +45,8 @@ if [[ ${#PUBLISH_ARGS[@]} -eq 0 ]]; then
   PUBLISH_ARGS+=(-p "127.0.0.1:4000:4000")
 fi
 
-# add to network
-# and remove stale container from a previous run if present.
-$RUNTIME network inspect "$NETWORK_NAME" >/dev/null 2>&1 || $RUNTIME network create "$NETWORK_NAME"
-$RUNTIME rm -f "$CONTAINER_NAME" 2>/dev/null || true
-
 exec $RUNTIME run --rm \
   --name "$CONTAINER_NAME" \
-  --network "$NETWORK_NAME" \
   "${PUBLISH_ARGS[@]}" \
   --env-file "$TMPENV" \
   "$IMAGE_NAME"
