@@ -12,9 +12,13 @@
     }:
     let
       lib = nixpkgs.lib;
+      # aarch64-darwin is supported because pqcrypto 0.4.0 ships a macOS arm64
+      # wheel; x86_64-darwin is intentionally excluded (no macOS Intel wheel
+      # exists on PyPI).
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "aarch64-darwin"
       ];
       forAllSystems = lib.genAttrs systems;
 
@@ -22,40 +26,55 @@
       # The Chutes E2EE provider relies on `chutes-e2ee`, which pins
       # `pqcrypto==0.4.0`.  `pqcrypto` ships *only* precompiled wheels on PyPI
       # (no sdist) and is not packaged in nixpkgs, so we fetch the wheel that
-      # matches the interpreter ABI and host architecture.  See
+      # matches the interpreter ABI, OS and host architecture.  See
       # https://pypi.org/project/pqcrypto/0.4.0/ for all available wheels.
+      #
+      # macOS support: pqcrypto 0.4.0 only publishes macOS ARM64 wheels
+      # (`macosx_11_0_arm64`), no Intel ones — so Darwin builds are limited to
+      # `aarch64-darwin`.
       # -----------------------------------------------------------------------
       pqcryptoWheel =
         pkgs: python:
         let
           wheels = {
             # pythonVersion -> { platform -> { url, hash } }
+            # platform is one of: linux-x86_64, linux-aarch64, darwin-aarch64
             "3.13" = {
-              x86_64 = {
+              "linux-x86_64" = {
                 url = "https://files.pythonhosted.org/packages/bb/01/9c57f061b6798bc478cb552d3653bff4f447b34f989e0f49326fa558719e/pqcrypto-0.4.0-cp313-cp313-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl";
                 hash = "sha256-HuKVTsqEFJ4pBkufgvEwvRrF4NljsKNeSKfJc3wuOU4=";
               };
-              aarch64 = {
+              "linux-aarch64" = {
                 url = "https://files.pythonhosted.org/packages/0d/d6/98abb4e44df8c361a1a0f67e0306e6f0257c3ca8aef6bedefc0956047949/pqcrypto-0.4.0-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl";
                 hash = "sha256-I5zBtgzfVPRefxPEXKq3hFAM6OTn+f3oZXufresSUAg=";
               };
+              "darwin-aarch64" = {
+                url = "https://files.pythonhosted.org/packages/dd/5d/dd3752d741f8772eb7f0a49226bb02966c1fd7b85c7aa83027213a2e9973/pqcrypto-0.4.0-cp313-cp313-macosx_11_0_arm64.whl";
+                hash = "sha256-7ejwrfsw3zXw/t+rMnd5J5L1+uXrZsS0s9envYmmR3g=";
+              };
             };
             "3.14" = {
-              x86_64 = {
+              "linux-x86_64" = {
                 url = "https://files.pythonhosted.org/packages/57/60/98ed5d9d959c3b5c9d604a832d12e30d249c2cffce3496330fe3855a1599/pqcrypto-0.4.0-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl";
                 hash = "sha256-EDsFhlgjI/RD78BxiTx3W92cdIUbiFI8CG7zuuK1NvE=";
               };
-              aarch64 = {
+              "linux-aarch64" = {
                 url = "https://files.pythonhosted.org/packages/ad/6d/fa97f2003a8b2124970bd238aedaebe36364401042ac49e929e70abb24bd/pqcrypto-0.4.0-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl";
                 hash = "sha256-Vz7BHhA8cYX0spivWSSn7iTsduHG+18RrzMrc2CVCtg=";
+              };
+              "darwin-aarch64" = {
+                url = "https://files.pythonhosted.org/packages/cf/f2/335ca98cf32d0723b86e672cd0b06da92bd091e3599b881b70e93f4faef4/pqcrypto-0.4.0-cp314-cp314-macosx_11_0_arm64.whl";
+                hash = "sha256-YIfG5G+2Afp2rkC8PrVhiefOPam1B0BmkxW+P7V1cBA=";
               };
             };
           };
           platform =
-            if pkgs.stdenv.hostPlatform.isx86_64
-            then "x86_64"
-            else if pkgs.stdenv.hostPlatform.isAarch64
-            then "aarch64"
+            if pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isx86_64
+            then "linux-x86_64"
+            else if pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isAarch64
+            then "linux-aarch64"
+            else if pkgs.stdenv.hostPlatform.isDarwin && pkgs.stdenv.hostPlatform.isAarch64
+            then "darwin-aarch64"
             else throw "pqcrypto wheel not available for ${pkgs.stdenv.hostPlatform.system}";
           spec = (wheels.${python.pythonVersion} or (throw "pqcrypto wheel not configured for Python ${python.pythonVersion}; add it in flake.nix (pqcryptoWheel)")).${platform};
         in
