@@ -81,6 +81,7 @@ def find_models_dev_limits(model_id: str) -> tuple[int | None, int | None]:
             "gemini": "google",
             "xai": "xai",
             "perplexity": "perplexity",
+            "deepseek": "deepseek",
         }
 
         dev_provider = provider_map.get(provider)

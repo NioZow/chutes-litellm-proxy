@@ -11,6 +11,7 @@ A LiteLLM proxy that exposes a unified OpenAI-compatible API for all major provi
 | Google      | `GEMINI_API_KEY`     | `gemini/`      |
 | Perplexity  | `PERPLEXITY_API_KEY` | `perplexity/`  |
 | xAI         | `XAI_API_KEY`        | `xai/`         |
+| DeepSeek    | `DEEPSEEK_API_KEY`   | `deepseek/`    |
 | Chutes E2EE | `CHUTES_API_KEY`     | `chutes-e2ee/` |
 
 ## Deployment
@@ -197,6 +198,51 @@ in {
     };
   };
 }
+```
+
+#### Nix flake (native build, no container)
+
+The repository is also a Nix flake that builds the proxy as a native Python
+environment (no podman/docker). It builds `litellm` from nixpkgs, the
+`chutes-e2ee` transport from source, and fetches the `pqcrypto==0.4.0` wheel
+that `chutes-e2ee` requires.
+
+```sh
+# Development shell (litellm + chutes provider + tools on $PATH)
+nix develop
+
+# Build the proxy package
+nix build .#
+
+# Run the proxy (generate_config.py then litellm on 127.0.0.1:4000)
+nix run .# -- LITELLM_PORT=4000
+# or set env vars when launching:
+#   LITELLM_HOST=127.0.0.1 LITELLM_PORT=4000 CHUTES_API_KEY=<key> nix run .#
+```
+
+To install it on NixOS, import `nixosModules.default` from the flake and use the
+options declared in [`./options.nix`](./options.nix):
+
+```nix
+{ inputs, ... }: {
+  imports = [ inputs.chutes-litellm.nixosModules.default ];
+
+  services.litellm = {
+    enable = true;
+    apiKeys = {
+      CHUTES_API_KEY     = config.age.secrets."litellm/chutes".path;
+      ANTHROPIC_API_KEY  = config.age.secrets."litellm/anthropic".path;
+      OPENAI_API_KEY     = config.age.secrets."litellm/openai".path;
+    };
+  };
+}
+```
+
+On first build, fill in the `chutes-e2ee` source hash in `flake.nix` (the
+placeholder is intentional):
+
+```sh
+nix build .#default 2>&1 | grep -A2 'got:'
 ```
 
 ## Usage

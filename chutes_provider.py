@@ -43,6 +43,7 @@ import httpx
 import litellm
 from chutes_e2ee import ChutesE2EETransport
 from litellm.llms.custom_llm import CustomLLM
+from litellm.llms.openai_like.chat.transformation import OpenAILikeChatConfig
 from litellm.types.llms.openai import (
     ChatCompletionToolCallChunk,
     ChatCompletionToolCallFunctionChunk,
@@ -57,6 +58,92 @@ from litellm.types.utils import (
 from openai import OpenAI
 
 CHUTES_API_BASE = "https://llm.chutes.ai"
+
+# LiteLLM validates request params against the provider's "supported openai
+# params" before calling a custom provider.  The default custom-provider list
+# (OpenAILikeChatConfig) has no `thinking`/`reasoning_effort`, so opencode's
+# reasoning-effort variants are rejected with UnsupportedParamsError.  Extend
+# that list so the params reach our provider, which forwards them to Chutes.
+_OpenAILikeChatConfig_get_supported = OpenAILikeChatConfig.get_supported_openai_params
+
+
+def _get_supported_openai_params(self: OpenAILikeChatConfig, model: str) -> list:
+    params = _OpenAILikeChatConfig_get_supported(self, model)
+    for extra in ("thinking", "reasoning_effort"):
+        if extra not in params:
+            params.append(extra)
+    return params
+
+
+OpenAILikeChatConfig.get_supported_openai_params = _get_supported_openai_params  # type: ignore[method-assign]
+
+# Gemma-4 expects the literal control token <|think|> at the start of the system
+# prompt to enable reasoning mode.  Inject it automatically so downstream callers
+# don't need to know which models support it.
+_GEMMA_4_ID = "gemma-4"
+_THINK_TOKEN = "<|think|>"
+
+
+# DeepSeek-family "thinking" models (V3.2, V4 Flash/Pro, and future releases)
+# separate chain-of-thought from the answer only when explicitly asked to.  On
+# the Chutes backend the CoT is NOT separated out by default: without
+# `reasoning_effort` the model dumps its reasoning verbatim into `content`,
+# which is why opencode shows no thinking block and the answer looks bloated.
+# Injecting `reasoning_effort` (and the `thinking` toggle via `extra_body`,
+# matching the upstream DeepSeek API) makes the model return the CoT in
+# `reasoning_content` alongside a concise `content`, so LiteLLM/opencode render
+# a proper thinking block.  Done here rather than in the caller because
+# LiteLLM's param validation rejects these params for custom providers.
+_DEEPSEEK_ID = "deepseek"
+_DEEPSEEK_REASONING_EFFORT = "high"
+
+
+def _deepseek_thinkify(model: str, params: dict) -> dict:
+    """Enable DeepSeek-family thinking mode so reasoning is separated from content."""
+    if _DEEPSEEK_ID not in model.lower():
+        return params
+
+    params = dict(params)
+    if "reasoning_effort" not in params:
+        params["reasoning_effort"] = _DEEPSEEK_REASONING_EFFORT
+
+    extra = dict(params.get("extra_body") or {})
+    if "thinking" not in extra:
+        enabled = params["reasoning_effort"] != "none"
+        extra["thinking"] = {"type": "enabled" if enabled else "disabled"}
+    params["extra_body"] = extra
+    return params
+
+
+def _gemma_4_thinkify(model: str, messages: list[dict]) -> list[dict]:
+    """Prepend <|think|> to the system prompt when the model is Gemma-4."""
+    if _GEMMA_4_ID not in model.lower():
+        return messages
+
+    if not messages:
+        return [{"role": "system", "content": _THINK_TOKEN}]
+
+    msgs = list(messages)
+    if msgs[0].get("role") == "system":
+        content = msgs[0].get("content", "")
+        if isinstance(content, list):
+            # OpenAI-style mixed content (text / image)
+            text_parts = [p for p in content if p.get("type") == "text"]
+            if text_parts:
+                first_text = text_parts[0].get("text", "")
+                if not first_text.strip().startswith(_THINK_TOKEN):
+                    text_parts[0]["text"] = f"{_THINK_TOKEN}\n{first_text}"
+            else:
+                content.insert(0, {"type": "text", "text": _THINK_TOKEN})
+            msgs[0]["content"] = content
+        else:
+            if not str(content).strip().startswith(_THINK_TOKEN):
+                msgs[0]["content"] = f"{_THINK_TOKEN}\n{content}"
+    else:
+        msgs.insert(0, {"role": "system", "content": _THINK_TOKEN})
+
+    return msgs
+
 
 # httpx read timeout for streaming.  Guards against the Chutes API stalling
 # mid-stream: without this the background thread blocks forever.
@@ -209,12 +296,14 @@ class ChutesE2EEProvider(CustomLLM):
 
     def completion(self, *_: Any, **kwargs: Any) -> ModelResponse:
         params = _clean(kwargs.get("optional_params", {}))
+        params = _deepseek_thinkify(kwargs["model"], params)
         client = _client(kwargs["api_key"])
+        messages = _gemma_4_thinkify(kwargs["model"], kwargs["messages"])
         while True:
             try:
                 response = client.chat.completions.create(
                     model=kwargs["model"],
-                    messages=kwargs["messages"],
+                    messages=messages,
                     **params,
                 )
                 break
@@ -229,6 +318,8 @@ class ChutesE2EEProvider(CustomLLM):
 
     def streaming(self, *_: Any, **kwargs: Any) -> Iterator[GenericStreamingChunk]:
         params = _clean(kwargs.get("optional_params", {}), drop_stream=True)
+        params = _deepseek_thinkify(kwargs["model"], params)
+        messages = _gemma_4_thinkify(kwargs["model"], kwargs["messages"])
 
         def _gen() -> Iterator[GenericStreamingChunk]:
             p = dict(params)
@@ -237,7 +328,7 @@ class ChutesE2EEProvider(CustomLLM):
                 try:
                     stream = client.chat.completions.create(
                         model=kwargs["model"],
-                        messages=kwargs["messages"],
+                        messages=messages,
                         stream=True,
                         **p,
                     )

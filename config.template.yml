@@ -24,6 +24,11 @@ model_list:
       model: "xai/*"
       api_key: "os.environ/XAI_API_KEY"
 
+  - model_name: "deepseek/*"
+    litellm_params:
+      model: "deepseek/*"
+      api_key: "os.environ/DEEPSEEK_API_KEY"
+
   - model_name: "chutes-e2ee/*"
     litellm_params:
       model: "chutes-e2ee/*"

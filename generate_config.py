@@ -11,8 +11,10 @@ import sys
 import httpx
 import yaml
 
-TEMPLATE = "/app/config.template.yml"
-OUTPUT = "/app/config.generated.yml"
+# Paths are overridable so the same script works both in the container
+# (defaults, see Dockerfile) and in the Nix wrapper (which sets the env vars).
+TEMPLATE = os.environ.get("LITELLM_TEMPLATE", "/app/config.template.yml")
+OUTPUT = os.environ.get("LITELLM_OUTPUT", "/app/config.generated.yml")
 TIMEOUT = 15
 CHUTES_API_BASE = "https://llm.chutes.ai"
 
@@ -73,16 +75,16 @@ def fetch_gemini(api_key: str) -> list[str]:
     return sorted(m for m in all_ids if not any(m.startswith(p) for p in SKIP_GEMINI))
 
 
-def fetch_chutes(api_key: str) -> list[str]:
+def fetch_chutes(api_key: str) -> list[dict]:
     r = httpx.get(
         f"{CHUTES_API_BASE}/v1/models",
         headers={"Authorization": f"Bearer {api_key}"},
         timeout=TIMEOUT,
     )
     r.raise_for_status()
-    all_ids = [m["id"] for m in r.json()["data"]]
-    # Keep only TEE (end-to-end encrypted) models
-    return [m for m in all_ids if m.endswith("-TEE")]
+    # Keep only TEE (end-to-end encrypted) models, with full metadata so we can
+    # advertise capabilities (reasoning, tools, vision) and limits to opencode.
+    return [m for m in r.json()["data"] if m.get("id", "").endswith("-TEE")]
 
 
 def fetch_openai_compat(api_key: str, base_url: str) -> list[str]:
@@ -114,11 +116,15 @@ PROVIDERS: dict[str, dict] = {
     },
     "perplexity": {
         "env": "PERPLEXITY_API_KEY",
-        "fetch": lambda key: fetch_openai_compat(key, "https://api.perplexity.ai"),
+        "fetch": lambda key: fetch_openai_compat(key, "https://api.perplexity.ai/v1"),
     },
     "xai": {
         "env": "XAI_API_KEY",
         "fetch": lambda key: fetch_openai_compat(key, "https://api.x.ai/v1"),
+    },
+    "deepseek": {
+        "env": "DEEPSEEK_API_KEY",
+        "fetch": lambda key: fetch_openai_compat(key, "https://api.deepseek.com"),
     },
     "chutes-e2ee": {
         "env": "CHUTES_API_KEY",
@@ -130,6 +136,46 @@ PROVIDERS: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+
+# Reasoning-effort levels supported by DeepSeek-family thinking models. These
+# surface as opencode variants via `supports_<effort>_reasoning_effort: true`
+# flags in model_info (see opencode-plugin-litellm, which scans model_info for
+# keys matching `supports_([a-z]+)_reasoning_effort`).
+_DEEPSEEK_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+
+
+def _build_chutes_model_info(model: dict) -> dict:
+    """Build a LiteLLM `model_info` block from Chutes model metadata.
+
+    Advertises capabilities opencode reads from `/v1/model/info`:
+      - supports_reasoning / reasoning-effort variants (for DeepSeek thinking models)
+      - supports_function_calling / supports_vision
+      - max_input_tokens / max_output_tokens
+      - mode: "chat"
+    """
+    features = set(model.get("supported_features") or [])
+    modalities = set(model.get("input_modalities") or [])
+    model_id = model.get("id", "")
+
+    info: dict = {
+        "mode": "chat",
+        "supports_function_calling": "tools" in features,
+        "supports_vision": "image" in modalities,
+        "supports_reasoning": "reasoning" in features,
+    }
+
+    if model.get("context_length"):
+        info["max_input_tokens"] = model["context_length"]
+    if model.get("max_output_length"):
+        info["max_output_tokens"] = model["max_output_length"]
+
+    # DeepSeek-family thinking models advertise reasoning-effort variants.
+    if "deepseek" in model_id.lower() and "reasoning" in features:
+        for effort in _DEEPSEEK_REASONING_EFFORTS:
+            info[f"supports_{effort}_reasoning_effort"] = True
+
+    return info
 
 
 def expand_wildcard(provider: str, template_entry: dict) -> list[dict]:
@@ -147,16 +193,33 @@ def expand_wildcard(provider: str, template_entry: dict) -> list[dict]:
     try:
         models = cfg["fetch"](api_key)
         log(f"{provider}: {len(models)} models fetched")
-        return [
-            {
-                "model_name": f"{provider}/{model_id}",
-                "litellm_params": {
+        entries: list[dict] = []
+        for model in models:
+            if isinstance(model, dict):
+                model_id = model.get("id", "")
+                litellm_params = {
                     "model": f"{provider}/{model_id}",
                     "api_key": f"os.environ/{cfg['env']}",
-                },
-            }
-            for model_id in models
-        ]
+                }
+                entry: dict = {
+                    "model_name": f"{provider}/{model_id}",
+                    "litellm_params": litellm_params,
+                }
+                info = _build_chutes_model_info(model)
+                if info:
+                    entry["model_info"] = info
+                entries.append(entry)
+            else:
+                entries.append(
+                    {
+                        "model_name": f"{provider}/{model}",
+                        "litellm_params": {
+                            "model": f"{provider}/{model}",
+                            "api_key": f"os.environ/{cfg['env']}",
+                        },
+                    }
+                )
+        return entries
     except Exception as exc:
         log(f"failed to fetch {provider} models ({exc}) — skipping")
         return []
