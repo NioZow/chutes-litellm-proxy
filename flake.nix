@@ -116,6 +116,22 @@
               pqcrypto
             ];
           };
+
+          # litellm 1.97.0+ imports `expression` (Expression.tagged_union) in its
+          # MCP outbound-credentials module at process start, but nixpkgs ships no
+          # `expression` for Python 3.14, so it was silently dropped from the `proxy`
+          # extra. Package it here (pure-python wheel) so the proxy starts at all.
+          expression = python.pkgs.buildPythonPackage rec {
+            pname = "expression";
+            version = "5.7.0";
+            format = "wheel";
+            src = pkgs.fetchurl {
+              url = "https://files.pythonhosted.org/packages/07/9d/790e25dcba0b299f9a756ae2dcc52a705be07bd1c3fd54267ade0521bea6/expression-5.7.0-py3-none-any.whl";
+              hash = "sha256-2NkDy53cslLb1kYS4ym9hvCddwx4Eur4+cwLn45kgL0=";
+            };
+            propagatedBuildInputs = [ python.pkgs.typing-extensions ];
+            doCheck = false;
+          };
         in
         python.withPackages (
           ps: [
@@ -129,6 +145,7 @@
             }))
             ps.openai
             chutes-e2ee
+            expression
           ]
         );
 
