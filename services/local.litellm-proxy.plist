@@ -8,9 +8,6 @@
     <key>ProgramArguments</key>
     <array>
         <string>/path/to/your/run.sh</string>
-        <string>BIND=127.0.0.1:4000</string>
-        <!-- Add secret args here, e.g.: -->
-        <!-- <string>CHUTES_API_KEY=/path/to/secret/file</string> -->
     </array>
 
     <key>RunAtLoad</key>
@@ -23,6 +20,13 @@
     <dict>
         <key>PATH</key>
         <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <!-- Network binding -->
+        <key>LITELLM_BIND</key>
+        <string>127.0.0.1:4000</string>
+        <!-- Secret file paths (recommended). Use *_API_KEY_PATH so the proxy
+             reads the file at runtime. -->
+        <!-- <key>CHUTES_API_KEY_PATH</key> -->
+        <!-- <string>/path/to/secret/file</string> -->
     </dict>
 
     <key>StandardOutPath</key>

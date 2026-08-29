@@ -23,6 +23,32 @@ def log(msg: str) -> None:
     print(f"[generate_config] {msg}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# Resolve *_API_KEY_PATH env variables so API keys can be declared as file
+# paths in systemd service files (e.g. ANTHROPIC_API_KEY_PATH=/run/secrets/...)
+# ---------------------------------------------------------------------------
+
+def _resolve_api_key_paths() -> None:
+    """For any env var ending in `_API_KEY_PATH`, read the file and inject the
+    raw value as the corresponding `_API_KEY` variable into ``os.environ``."""
+    for key, path in os.environ.items():
+        if not key.endswith("_API_KEY_PATH"):
+            continue
+        base = key[:-5]  # strip `_PATH`
+        if base in os.environ:
+            continue  # explicit key wins
+        try:
+            with open(path, "r") as f:
+                os.environ[base] = f.read().strip()
+            log(f"resolved {key} -> {base}")
+        except OSError as exc:
+            log(f"failed to read {key} ({exc})")
+
+
+# Run once at module load so callers don't need to remember it.
+_resolve_api_key_paths()
+
+
 # Per-provider fetch functions — return list of bare model IDs
 
 

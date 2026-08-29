@@ -5,46 +5,26 @@
 #   services.litellm = {
 #     enable = true;
 #     apiKeys = {
-#       CHUTES_API_KEY  = config.age.secrets."litellm/chutes".path;
-#       ANTHROPIC_API_KEY = config.age.secrets."litellm/anthropic".path;
-#       OPENAI_API_KEY  = config.age.secrets."litellm/openai".path;
+#       CHUTES_API_KEY_PATH     = config.age.secrets."litellm/chutes".path;
+#       ANTHROPIC_API_KEY_PATH  = config.age.secrets."litellm/anthropic".path;
+#       OPENAI_API_KEY          = "sk-abc123";
 #     };
 #   };
 #
-# Each value of `apiKeys` is a path to a file containing the raw key value
-# (no trailing newline, no `KEY=` prefix). The service reads them at runtime.
-
+# Values may be either a raw string (forwarded as-is) or a path (e.g. a secret
+# file). The key is the exact environment variable name that the proxy will see.
+# Use *_PATH suffixes when you want the proxy to read the key from a file at
+# runtime; use the plain *_API_KEY name when you want to pass the key directly.
 {
   config,
   lib,
-  pkgs,
   ...
-}:
-let
+}: let
   cfg = config.services.litellm;
 
-  # Build a launch script that (a) sources each secret file into the matching
-  # environment variable, (b) points the wrapper at the configured host/port and
-  # any custom config template, and (c) execs the proxy.  The secret paths are
-  # baked into the script (paths are not secret), but the values are read only
-  # at runtime, so plaintext keys never land in the Nix store.
-  envExports = lib.concatMapStringsSep "\n" (
-    name: ''
-      export ${name}="$(cat '${cfg.apiKeys.${name}}')"
-    ''
-  ) (lib.attrNames cfg.apiKeys);
-
-  startScript = pkgs.writeShellScript "litellm-start" ''
-    set -eu
-    ${envExports}
-    export LITELLM_HOST='${cfg.host}'
-    export LITELLM_PORT='${toString cfg.port}'
-    export LITELLM_OUTPUT='/var/lib/litellm/config.generated.yml'
-    ${lib.optionalString (cfg.configTemplate != null) "export LITELLM_TEMPLATE='${cfg.configTemplate}'"}
-    exec '${cfg.package}/bin/litellm-proxy'
-  '';
-in
-{
+  # Forward apiKeys directly into the service environment.
+  apiKeyEnv = lib.mapAttrsToList (name: value: "${name}=${toString value}") cfg.apiKeys;
+in {
   options.services.litellm = {
     enable = lib.mkEnableOption "LiteLLM proxy (Chutes E2EE)";
 
@@ -66,15 +46,17 @@ in
     };
 
     apiKeys = lib.mkOption {
-      type = lib.types.attrsOf lib.types.path;
+      type = lib.types.attrsOf (lib.types.either lib.types.str lib.types.path);
       default = {};
       example = {
-        CHUTES_API_KEY = "/run/secrets/chutes";
-        ANTHROPIC_API_KEY = "/run/secrets/anthropic";
+        CHUTES_API_KEY_PATH = "/run/secrets/chutes";
+        OPENAI_API_KEY = "sk-raw-key-string";
       };
       description = ''
-        Mapping of environment variable name (e.g. `CHUTES_API_KEY`) to the path
-        of a file containing that key's raw value.
+        Mapping of environment variable names to their values. Values may be raw
+        strings (passed through as-is) or paths (e.g. secret files). The proxy
+        natively supports variables ending in `_PATH`: it reads the file and
+        treats the content as the underlying key.
       '';
     };
 
@@ -97,13 +79,13 @@ in
   config = lib.mkIf cfg.enable {
     systemd.services.litellm = {
       description = "LiteLLM proxy (Chutes E2EE)";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
+      wantedBy = ["multi-user.target"];
+      after = ["network-online.target"];
+      wants = ["network-online.target"];
 
       serviceConfig = {
         Type = "simple";
-        ExecStart = startScript;
+        ExecStart = "${cfg.package}/bin/litellm-proxy";
         Restart = "on-failure";
         RestartSec = 5;
         DynamicUser = true;
@@ -115,13 +97,19 @@ in
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = true;
-        ReadWritePaths = [ "/var/lib/litellm" ];
-        Environment = [
-          "PYTHONUNBUFFERED=1"
-        ];
+        ReadWritePaths = ["/var/lib/litellm"];
+        Environment =
+          [
+            "PYTHONUNBUFFERED=1"
+            "LITELLM_HOST=${cfg.host}"
+            "LITELLM_PORT=${toString cfg.port}"
+            "LITELLM_OUTPUT=/var/lib/litellm/config.generated.yml"
+          ]
+          ++ lib.optional (cfg.configTemplate != null) "LITELLM_TEMPLATE=${toString cfg.configTemplate}"
+          ++ apiKeyEnv;
       };
     };
 
-    networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
+    networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [cfg.port];
   };
 }

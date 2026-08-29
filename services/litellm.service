@@ -3,12 +3,18 @@ Description=LiteLLM proxy
 
 [Service]
 Type=simple
-ExecStart=/path/to/your/run.sh BIND=127.0.0.1:4000
-# Add secret args to ExecStart, e.g.:
-# ExecStart=/path/to/your/run.sh BIND=127.0.0.1:4000 MY_SECRET=/path/to/secret/file
+ExecStart=/path/to/your/run.sh
+# Network binding (host:port). Multiple ports can be passed as a comma-separated
+# list, e.g. LITELLM_BIND=127.0.0.1:4000,192.168.1.10:4000.
+Environment=LITELLM_BIND=127.0.0.1:4000
+# Add secret file paths via Environment= declarations (recommended):
+# Environment=ANTHROPIC_API_KEY_PATH=/run/secrets/anthropic
+# Environment=OPENAI_API_KEY_PATH=/run/secrets/openai
+# Environment=GEMINI_API_KEY_PATH=/run/secrets/gemini
+# Environment=CHUTES_API_KEY_PATH=/run/secrets/chutes
 Restart=on-failure
 RestartSec=5
-# You may add proxy env variables too
+# Optionally force a specific container engine:
 # Environment=RUNTIME=podman
 
 [Install]

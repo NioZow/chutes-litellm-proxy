@@ -14,6 +14,12 @@ A LiteLLM proxy that exposes a unified OpenAI-compatible API for all major provi
 | DeepSeek    | `DEEPSEEK_API_KEY`   | `deepseek/`    |
 | Chutes E2EE | `CHUTES_API_KEY`     | `chutes-e2ee/` |
 
+> **Native `_PATH` support:** Instead of setting `ANTHROPIC_API_KEY=sk-…` directly,
+> you may set `ANTHROPIC_API_KEY_PATH=/run/secrets/anthropic` (or any path to a file
+> containing the raw key). The proxy will read the file and treat its content as the
+> key. This works for every provider above and is the cleanest way to inject secrets
+> from systemd service files.
+
 ## Deployment
 
 > [!WARNING]
@@ -31,12 +37,16 @@ Otherwise you can launch the [run.sh](./run.sh) script directly.
 ```
 $ head run.sh
 #!/usr/bin/env bash
-# usage: run.sh [BIND=interface:port ...] [KEY=filepath ...]
-# example:
-#   - run.sh BIND=127.0.0.1:4000 BIND=192.168.90.1:8888 ANTHROPIC_API_KEY=/tmp/anthropic_api_key
-#   - run.sh BIND=0.0.0.0:4000 OPENAI_API_KEY=/tmp/openai_api_key
-# note: also reads the runtime from the "RUNTIME" env variable -> podman | docker | auto
-# note: if no interface is specified `127.0.0.1:4000:4000`
+# Runs the litellm-proxy container. Configuration is supplied entirely through
+# environment variables (no CLI arguments are accepted).
+#
+# Env vars:
+#   LITELLM_BIND      Host:port to publish (default: 127.0.0.1:4000; comma-separated)
+#   RUNTIME           Container engine: podman | docker | auto (default: auto)
+#   *_API_KEY          Raw API keys forwarded as-is.
+#   *_API_KEY_PATH     File path containing API key; forwarded as *_API_KEY.
+# Example:
+#   LITELLM_BIND=127.0.0.1:4000 ANTHROPIC_API_KEY_PATH=/run/secrets/anthropic ./run.sh
 ```
 
 #### macOS
@@ -78,9 +88,8 @@ systemctl --user enable --now litellm
   ...
 }: let
   cfg = config.custom.services.litellm;
-  secretArgs = lib.concatStringsSep " " (
-    lib.mapAttrsToList (name: path: "${name}=${path}") cfg.envSecrets
-  );
+  # Build environment variable assignments for the service.
+  apiKeyEnv = lib.mapAttrsToList (name: value: "${name}=${value}") cfg.envSecrets;
   runScript = pkgs.writeShellScript "litellm-run" (
     builtins.readFile "${inputs.self}/containers/litellm/run.sh"
   );
@@ -89,18 +98,18 @@ in {
     enable = lib.mkEnableOption "LiteLLM proxy";
 
     envSecrets = lib.mkOption {
-      type = lib.types.attrsOf lib.types.path;
+      type = lib.types.attrsOf (lib.types.either lib.types.str lib.types.path);
       default = {};
-      description = "Mapping of env var name to a secret file containing its raw value.";
+      description = "Mapping of env var name to a raw key string or a secret file path.";
       example = {
-          envSecrets = {
-            ANTHROPIC_API_KEY = config.age.secrets."litellm/anthropic".path;
-            OPENAI_API_KEY = config.age.secrets."litellm/openai".path;
-            GEMINI_API_KEY = config.age.secrets."litellm/gemini".path;
-            CHUTES_API_KEY = config.age.secrets."litellm/chutes".path;
-            PERPLEXITY_API_KEY = config.age.secrets."litellm/perplexity".path;
+        envSecrets = {
+          ANTHROPIC_API_KEY_PATH = config.age.secrets."litellm/anthropic".path;
+          OPENAI_API_KEY = config.age.secrets."litellm/openai".path;
+          GEMINI_API_KEY = config.age.secrets."litellm/gemini".path;
+          CHUTES_API_KEY_PATH = config.age.secrets."litellm/chutes".path;
+          PERPLEXITY_API_KEY = config.age.secrets."litellm/perplexity".path;
         };
-      }
+      };
     };
 
     port = lib.mkOption {
@@ -120,9 +129,12 @@ in {
       };
       Service = {
         Type = "simple";
-        ExecStart = "${runScript} BIND=127.0.0.1:${toString cfg.port} ${secretArgs}";
+        ExecStart = "${runScript}";
         Restart = "on-failure";
         RestartSec = 5;
+        Environment = [
+          "LITELLM_BIND=127.0.0.1:${toString cfg.port}"
+        ] ++ apiKeyEnv;
       };
       Install = {
         WantedBy = ["default.target"];
@@ -144,7 +156,8 @@ in {
   ...
 }: let
   cfg = config.custom.macos.litellm;
-  secretArgs = lib.mapAttrsToList (name: path: "${name}=${path}") cfg.envSecrets;
+  # Map secrets into systemd-style KEY=value strings for the launchd EnvVars dict.
+  apiKeyEnv = lib.mapAttrsToList (name: value: "${name}=${value}") cfg.envSecrets;
   runScript = pkgs.writeShellScript "litellm-run" (
     builtins.readFile "${inputs.self}/containers/litellm/run.sh"
   );
@@ -153,9 +166,9 @@ in {
     enable = lib.mkEnableOption "LiteLLM proxy";
 
     envSecrets = lib.mkOption {
-      type = lib.types.attrsOf lib.types.path;
+      type = lib.types.attrsOf (lib.types.either lib.types.str lib.types.path);
       default = {};
-      description = "Mapping of env var name to a secret file containing its raw value.";
+      description = "Mapping of env var name to a raw key string or a secret file path.";
     };
 
     port = lib.mkOption {
@@ -179,18 +192,14 @@ in {
         enable = true;
         config = {
           Label = "local.litellm-proxy";
-          ProgramArguments =
-            [
-              "${runScript}"
-              "BIND=127.0.0.1:${toString cfg.port}"
-            ]
-            ++ secretArgs;
+          ProgramArguments = [ "${runScript}" ];
           RunAtLoad = true;
           KeepAlive = true;
           EnvironmentVariables = {
+            LITELLM_BIND = "127.0.0.1:${toString cfg.port}";
             # Cover Docker Desktop (Intel + Apple Silicon) and Homebrew paths.
             PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin";
-          };
+          } // cfg.envSecrets;
           StandardOutPath = "/Users/${username}/Library/Logs/litellm.log";
           StandardErrorPath = "/Users/${username}/Library/Logs/litellm-error.log";
         };
@@ -230,13 +239,19 @@ options declared in [`./options.nix`](./options.nix):
   services.litellm = {
     enable = true;
     apiKeys = {
-      CHUTES_API_KEY     = config.age.secrets."litellm/chutes".path;
-      ANTHROPIC_API_KEY  = config.age.secrets."litellm/anthropic".path;
-      OPENAI_API_KEY     = config.age.secrets."litellm/openai".path;
+      # Read from a file at runtime (proxy resolves _PATH natively)
+      CHUTES_API_KEY_PATH    = config.age.secrets."litellm/chutes".path;
+      ANTHROPIC_API_KEY_PATH = config.age.secrets."litellm/anthropic".path;
+      # Or pass a raw key directly
+      OPENAI_API_KEY = "sk-...";
     };
   };
 }
 ```
+
+> The `apiKeys` option maps env var names directly to values. The proxy natively
+> resolves `_PATH` suffixes at runtime (e.g. `CHUTES_API_KEY_PATH` is read as a
+> file), so you can mix raw keys and secret file paths in the same config.
 
 On first build, fill in the `chutes-e2ee` source hash in `flake.nix` (the
 placeholder is intentional):
