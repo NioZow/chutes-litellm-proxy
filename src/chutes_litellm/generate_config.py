@@ -324,7 +324,9 @@ def generate(template: str | None = None, output: str | None = None) -> str:
     config["model_list"] = fixed + expanded
     total = len(config["model_list"])
 
-    with open(output, "w") as f:
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
         yaml.dump(
             config, f, default_flow_style=False, allow_unicode=True, sort_keys=False
         )
