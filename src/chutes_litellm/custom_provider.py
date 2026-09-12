@@ -263,7 +263,7 @@ def _clean_model(model: str) -> str:
     return model
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
+def _env_bool(name: str, default: bool = True) -> bool:
     val = os.environ.get(name)
     if val is None:
         return default

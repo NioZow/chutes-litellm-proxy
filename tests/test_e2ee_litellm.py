@@ -242,13 +242,16 @@ def test_stock_transport_compatible_when_attestation_off(monkeypatch):
     from chutes_litellm import e2ee_litellm as el
 
     captured = _record_transport_ctor(monkeypatch)
-    os.environ.pop("CHUTES_VERIFY_ATTESTATION", None)
-    el._ChutesScopedTransport("cpk", hosts={"h"}, verify=False)
-    assert "instance_filter" not in captured
+    os.environ["CHUTES_VERIFY_ATTESTATION"] = "false"
+    try:
+        el._ChutesScopedTransport("cpk", hosts={"h"}, verify=False)
+        assert "instance_filter" not in captured
 
-    captured.clear()
-    el._ChutesScopedAsyncTransport("cpk", hosts={"h"}, verify=False)
-    assert "instance_filter" not in captured
+        captured.clear()
+        el._ChutesScopedAsyncTransport("cpk", hosts={"h"}, verify=False)
+        assert "instance_filter" not in captured
+    finally:
+        os.environ.pop("CHUTES_VERIFY_ATTESTATION", None)
 
 
 def test_filter_is_passed_when_attestation_on(monkeypatch):

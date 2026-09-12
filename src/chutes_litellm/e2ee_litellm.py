@@ -53,7 +53,7 @@ DEFAULT_E2EE_API_BASE = f"https://{DEFAULT_API_HOST}"
 DEFAULT_MODELS_BASE = f"https://{DEFAULT_LLM_HOST}"
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
+def _env_bool(name: str, default: bool = True) -> bool:
     val = os.environ.get(name)
     if val is None:
         return default

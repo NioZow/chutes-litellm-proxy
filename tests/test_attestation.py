@@ -705,7 +705,7 @@ def test_transport_wires_quote_and_gpu_flags(mock_server, monkeypatch):
     monkeypatch.setattr(a, "_verify_tdx_quote", fail_dcap)
     os.environ["CHUTES_VERIFY_ATTESTATION"] = "true"
     os.environ["CHUTES_VERIFY_QUOTE"] = "true"
-    os.environ.pop("CHUTES_VERIFY_GPU", None)
+    os.environ["CHUTES_VERIFY_GPU"] = "false"
     try:
         async def call():
             return await litellm.acompletion(

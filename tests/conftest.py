@@ -11,6 +11,12 @@ for _p in (SRC, ROOT):
 
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 os.environ.setdefault("CHUTES_E2EE_VERIFY_SSL", "false")
+# Attestation defaults to on in production but is off for tests that don't
+# explicitly opt in, so mock-server suites keep working without the optional
+# dcap-qvl / nv-attestation-sdk packages.
+os.environ["CHUTES_VERIFY_ATTESTATION"] = "false"
+os.environ["CHUTES_VERIFY_QUOTE"] = "false"
+os.environ["CHUTES_VERIFY_GPU"] = "false"
 
 from chutes_litellm import attestation, e2ee_litellm  # noqa: E402
 from mock_chutes_server import MockChutesServer  # noqa: E402
@@ -43,6 +49,11 @@ def mock_server():
 def _reset_litellm_clients():
     # Isolate tests: drop per-key transport clients + the attestation cache so a
     # fresh (env-faithful) transport is built for the next test.
+    # Also reset attestation env vars to safe defaults in case a previous test
+    # left them unset (the production default is now True).
+    os.environ["CHUTES_VERIFY_ATTESTATION"] = "false"
+    os.environ["CHUTES_VERIFY_QUOTE"] = "false"
+    os.environ["CHUTES_VERIFY_GPU"] = "false"
     e2ee_litellm._clients.clear()
     e2ee_litellm._aclients.clear()
     from chutes_litellm import custom_provider

@@ -366,7 +366,7 @@
       ...
     }: {
       imports = [./options.nix];
-      services.litellm.package = lib.mkDefault (mkProxy pkgs {});
+      services.litellm.package = lib.mkDefault (mkProxy pkgs {withAttestation = true;});
     };
   };
 }
