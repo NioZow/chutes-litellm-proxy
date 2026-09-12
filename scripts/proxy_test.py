@@ -24,7 +24,7 @@ from openai import OpenAI
 PROXY_URL = "http://localhost:4000"
 DEFAULT_MODELS = [
     "gemini/gemini-2.5-flash",
-    "chutes-e2ee/Qwen/Qwen3-32B-TEE",
+    "chutes/Qwen/Qwen3-32B-TEE",
 ]
 
 client = OpenAI(api_key="no-auth", base_url=f"{PROXY_URL}/v1")

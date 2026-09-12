@@ -1,0 +1,13 @@
+# working copy of the litellm source used during development (not part of the build)
+litellm/
+# python / tooling
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+dist/
+config.generated.yml
+# nix / build artifacts
+result

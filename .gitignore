@@ -1,2 +1,21 @@
 result
-__pycache__
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+dist/
+/config.generated.yml
+/litellm/
+
+.direnv/
+
+# Local checkout of the chutes-e2ee-transport fork (not a submodule, not committed)
+/chutes-e2ee-transport/
+/litellm/
+
+# nv-attestation-sdk writes these to the CWD when imported
+attestation_sdk.log
+verifier.log
+*.log

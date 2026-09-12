@@ -1,20 +1,25 @@
-#!/usr/bin/env python3
 """
 Reads config.template.yml, expands wildcard provider entries into concrete
 model entries by querying each provider's models API, then writes
-config.generated.yml. Runs once at container startup.
+config.generated.yml. Runs once at startup (Docker entrypoint, Nix wrapper,
+`litellm-proxy` console script) or standalone (scripts/generate_config.py).
 """
 
 import os
 import sys
+import time
+from pathlib import Path
 
 import httpx
 import yaml
 
-# Paths are overridable so the same script works both in the container
-# (defaults, see Dockerfile) and in the Nix wrapper (which sets the env vars).
-TEMPLATE = os.environ.get("LITELLM_TEMPLATE", "/app/config.template.yml")
-OUTPUT = os.environ.get("LITELLM_OUTPUT", "/app/config.generated.yml")
+# Paths are overridable through the environment (the Nix wrapper and the NixOS
+# module set LITELLM_TEMPLATE/LITELLM_OUTPUT).  Defaults resolve to the template
+# shipped as package data next to this module, and a generated config in the
+# current working directory (the Docker image sets WORKDIR /app).
+CONFIG_DIR = Path(__file__).resolve().parent / "config"
+TEMPLATE = os.environ.get("LITELLM_TEMPLATE") or str(CONFIG_DIR / "config.template.yml")
+OUTPUT = os.environ.get("LITELLM_OUTPUT") or str(Path.cwd() / "config.generated.yml")
 TIMEOUT = 15
 CHUTES_API_BASE = "https://llm.chutes.ai"
 
@@ -152,7 +157,11 @@ PROVIDERS: dict[str, dict] = {
         "env": "DEEPSEEK_API_KEY",
         "fetch": lambda key: fetch_openai_compat(key, "https://api.deepseek.com"),
     },
-    "chutes-e2ee": {
+    "meta": {
+        "env": "META_API_KEY",
+        "fetch": lambda key: fetch_openai_compat(key, "https://api.meta.ai/v1"),
+    },
+    "chutes": {
         "env": "CHUTES_API_KEY",
         "fetch": fetch_chutes,
     },
@@ -168,21 +177,36 @@ PROVIDERS: dict[str, dict] = {
 # surface as opencode variants via `supports_<effort>_reasoning_effort: true`
 # flags in model_info (see opencode-plugin-litellm, which scans model_info for
 # keys matching `supports_([a-z]+)_reasoning_effort`).
-_DEEPSEEK_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+
+# OpenAI-style parameters Chutes models accept that LiteLLM would otherwise
+# strip (its custom-provider param list is a plain OpenAI list).  These are
+# declared per deployment so a client can actually send `reasoning_effort`
+# (DeepSeek thinking levels) or `chat_template_kwargs` / `thinking` (servers
+# that gate thinking behind a template flag, e.g. Gemma).
+_CHUTES_ALLOWED_OPENAI_PARAMS = (
+    "reasoning_effort",
+    "thinking",
+    "reasoning",
+    "chat_template_kwargs",
+    "top_k",
+    "repetition_penalty",
+    "min_p",
+    "enable_thinking",
+)
 
 
 def _build_chutes_model_info(model: dict) -> dict:
     """Build a LiteLLM `model_info` block from Chutes model metadata.
 
     Advertises capabilities opencode reads from `/v1/model/info`:
-      - supports_reasoning / reasoning-effort variants (for DeepSeek thinking models)
+      - supports_reasoning / reasoning-effort variants
       - supports_function_calling / supports_vision
       - max_input_tokens / max_output_tokens
       - mode: "chat"
     """
     features = set(model.get("supported_features") or [])
     modalities = set(model.get("input_modalities") or [])
-    model_id = model.get("id", "")
 
     info: dict = {
         "mode": "chat",
@@ -196,9 +220,27 @@ def _build_chutes_model_info(model: dict) -> dict:
     if model.get("max_output_length"):
         info["max_output_tokens"] = model["max_output_length"]
 
-    # DeepSeek-family thinking models advertise reasoning-effort variants.
-    if "deepseek" in model_id.lower() and "reasoning" in features:
-        for effort in _DEEPSEEK_REASONING_EFFORTS:
+    if modalities:
+        info["input_modalities"] = sorted(modalities)
+    output_modalities = set(model.get("output_modalities") or [])
+    if output_modalities:
+        info["output_modalities"] = sorted(output_modalities)
+
+    sampling = model.get("supported_sampling_parameters") or []
+    if sampling:
+        info["supported_sampling_parameters"] = sorted(sampling)
+
+    created = model.get("created")
+    if isinstance(created, (int, float)) and created > 0:
+        info["release_date"] = time.strftime("%Y-%m-%d", time.gmtime(created))
+
+    # Any model that supports reasoning gets the effort variants.  On Chutes a
+    # live ``reasoning_effort`` enables thinking for the whole family: DeepSeek
+    # honors the effort directly, while sglang/vLLM models (Gemma/V3.x) are
+    # switched on through the template flag the custom provider derives from it.
+    if "reasoning" in features:
+        info["reasoning_effort_levels"] = list(_REASONING_EFFORTS)
+        for effort in _REASONING_EFFORTS:
             info[f"supports_{effort}_reasoning_effort"] = True
 
     return info
@@ -223,10 +265,14 @@ def expand_wildcard(provider: str, template_entry: dict) -> list[dict]:
         for model in models:
             if isinstance(model, dict):
                 model_id = model.get("id", "")
-                litellm_params = {
+                litellm_params: dict = {
                     "model": f"{provider}/{model_id}",
                     "api_key": f"os.environ/{cfg['env']}",
                 }
+                # Let clients send thinking params LiteLLM would otherwise drop
+                # for a custom/OpenAI-compatible provider.
+                if provider == "chutes":
+                    litellm_params["allowed_openai_params"] = list(_CHUTES_ALLOWED_OPENAI_PARAMS)
                 entry: dict = {
                     "model_name": f"{provider}/{model_id}",
                     "litellm_params": litellm_params,
@@ -251,8 +297,17 @@ def expand_wildcard(provider: str, template_entry: dict) -> list[dict]:
         return []
 
 
-def main() -> None:
-    with open(TEMPLATE) as f:
+def generate(template: str | None = None, output: str | None = None) -> str:
+    """Expand the model template into a generated config file.
+
+    ``template`` / ``output`` fall back to the LITELLM_TEMPLATE / LITELLM_OUTPUT
+    env vars, then to the defaults computed at import time.  Returns the path of
+    the generated file.
+    """
+    template = template or TEMPLATE
+    output = output or OUTPUT
+
+    with open(template) as f:
         config = yaml.safe_load(f)
 
     fixed: list[dict] = []
@@ -269,12 +324,17 @@ def main() -> None:
     config["model_list"] = fixed + expanded
     total = len(config["model_list"])
 
-    with open(OUTPUT, "w") as f:
+    with open(output, "w") as f:
         yaml.dump(
             config, f, default_flow_style=False, allow_unicode=True, sort_keys=False
         )
 
-    log(f"wrote {OUTPUT} with {total} model(s)")
+    log(f"wrote {output} with {total} model(s)")
+    return output
+
+
+def main() -> None:
+    generate()
 
 
 if __name__ == "__main__":

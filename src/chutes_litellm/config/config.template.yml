@@ -29,18 +29,16 @@ model_list:
       model: "deepseek/*"
       api_key: "os.environ/DEEPSEEK_API_KEY"
 
-  - model_name: "chutes-e2ee/*"
+  - model_name: "meta/*"
     litellm_params:
-      model: "chutes-e2ee/*"
+      model: "meta/*"
+      api_key: "os.environ/META_API_KEY"
+
+  - model_name: "chutes/*"
+    litellm_params:
+      model: "chutes/*"
       api_key: "os.environ/CHUTES_API_KEY"
 
 general_settings:
   # no authentication required
   master_key: null
-
-litellm_settings:
-  custom_provider_map:
-    - {
-        "provider": "chutes-e2ee",
-        "custom_handler": "chutes_provider.chutes_e2ee_provider",
-      }

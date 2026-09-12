@@ -3,7 +3,7 @@ Description=LiteLLM proxy
 
 [Service]
 Type=simple
-ExecStart=/path/to/your/run.sh
+ExecStart=/path/to/your/scripts/run.sh
 # Network binding (host:port). Multiple ports can be passed as a comma-separated
 # list, e.g. LITELLM_BIND=127.0.0.1:4000,192.168.1.10:4000.
 Environment=LITELLM_BIND=127.0.0.1:4000

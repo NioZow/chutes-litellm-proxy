@@ -11,7 +11,7 @@ Generate or update the models block in opencode.jsonc from LiteLLM's /model/info
 Strategy:
   - All boolean capability flags (tool_call, temperature, attachment, reasoning) are derived
     exclusively from LiteLLM's model_info fields — no keyword guessing, no hardcoded lists.
-  - For models with no LiteLLM metadata (custom routes like chutes-e2ee), all capabilities
+  - For models with no LiteLLM metadata (custom routes like chutes), all capabilities
     default to True (conservative: assume the model supports everything until proven otherwise).
   - Limits fall back in order: LiteLLM API → Chutes API → models.dev → existing config → hardcoded default.
   - When --apply is used, the script rewrites only the provider.litellm.models block in
@@ -34,6 +34,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -121,15 +122,98 @@ def fetch_chutes_model_info(api_key: str) -> dict[str, dict]:
         return {}
 
 
+# Prefixes under which a Chutes model may be exposed by LiteLLM.  The builtin
+# provider uses ``chutes/``; the E2EE providers/custom routes use
+# ``chutes-e2ee/`` or ``chutes_e2ee/``.
+CHUTES_PREFIXES = ("chutes/", "chutes-e2ee/", "chutes_e2ee/")
+
+# Thinking levels advertised as opencode `variants` for reasoning models.
+REASONING_EFFORTS = ("off", "low", "medium", "high", "xhigh", "max")
+
+
+def _chutes_model_id(model_id: str) -> str | None:
+    """Return the bare Chutes model id for any known provider prefix."""
+    for prefix in CHUTES_PREFIXES:
+        if model_id.startswith(prefix):
+            return model_id[len(prefix) :]
+    return None
+
+
 def find_chutes_limits(
     model_id: str, chutes_map: dict[str, dict]
 ) -> tuple[int | None, int | None]:
-    """Look up context/output limits for a chutes-e2ee/* model from Chutes /v1/models data."""
-    if not chutes_map or not model_id.startswith("chutes-e2ee/"):
+    """Look up context/output limits for a Chutes model from /v1/models data."""
+    if not chutes_map:
         return None, None
-    chutes_id = model_id[len("chutes-e2ee/") :]  # e.g. "moonshotai/Kimi-K2.6-TEE"
+    chutes_id = _chutes_model_id(model_id)
+    if chutes_id is None:
+        return None, None
     info = chutes_map.get(chutes_id, {})
     return info.get("context_length"), info.get("max_output_length")
+
+
+def find_chutes_info(model_id: str, chutes_map: dict[str, dict]) -> dict:
+    """Return the raw Chutes /v1/models metadata entry for a model, if any."""
+    if not chutes_map:
+        return {}
+    chutes_id = _chutes_model_id(model_id)
+    if chutes_id is None:
+        return {}
+    return chutes_map.get(chutes_id, {})
+
+
+def find_chutes_cost(model_id: str, chutes_map: dict[str, dict]) -> dict | None:
+    """Map Chutes pricing (USD per 1M tokens) to opencode's `cost` block."""
+    if not chutes_map:
+        return None
+    chutes_id = _chutes_model_id(model_id)
+    if chutes_id is None:
+        return None
+    info = chutes_map.get(chutes_id, {})
+    price = info.get("price") or {}
+    if not price:
+        return None
+
+    def usd(entry: object) -> float | None:
+        if isinstance(entry, dict):
+            return entry.get("usd")
+        return None
+
+    cost = {
+        "input": usd(price.get("input")),
+        "output": usd(price.get("output")),
+        "cache_read": usd(price.get("input_cache_read")),
+        "cache_write": 0,
+    }
+    if cost["input"] is None or cost["output"] is None:
+        return None
+    return cost
+
+
+def reasoning_variants(info: dict) -> dict | None:
+    """Build opencode `variants` that map a thinking level to a request.
+
+    The proxy forwards ``chat_template_kwargs``/``reasoning_effort`` to Chutes
+    (see generate_config's allowed_openai_params and the custom provider), so
+    this mirrors the pi agent's ``thinkingLevelMap`` in opencode's variant form.
+    """
+    if info.get("supports_reasoning") is not True:
+        return None
+    levels = info.get("reasoning_effort_levels") or [
+        level for level in REASONING_EFFORTS if info.get(f"supports_{level}_reasoning_effort")
+    ]
+    if not levels:
+        levels = ["low", "medium", "high"]
+    variants: dict[str, dict] = {
+        "off": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    for level in levels:
+        if level in {"off", "none"}:
+            # "off" already disables thinking; "none" is the same request.
+            continue
+        variants[level] = {"chat_template_kwargs": {"reasoning_effort": level}}
+    return variants
+
 
 
 # Modes that indicate the model is a chat/completion model usable by opencode.
@@ -223,8 +307,8 @@ def build_entry(
     raw_tool = info.get("supports_function_calling")
     tool_call = False if raw_tool is False else True
 
-    # temperature: check supported_openai_params if available; default True when unknown
-    params = info.get("supported_openai_params")
+    # temperature: check supported params if available; default True when unknown
+    params = info.get("supported_openai_params") or info.get("supported_sampling_parameters")
     if params is not None:
         temperature = "temperature" in params
     else:
@@ -237,6 +321,13 @@ def build_entry(
     # attachment (vision): conservative — only True when explicitly stated
     attachment = info.get("supports_vision") is True
 
+    # Modalities from the Chutes listing, falling back to LiteLLM model_info.
+    chutes_info = find_chutes_info(model_id, chutes_map)
+    in_modalities = chutes_info.get("input_modalities") or info.get("input_modalities") or []
+    out_modalities = chutes_info.get("output_modalities") or info.get("output_modalities") or []
+    if not attachment:
+        attachment = bool({"image", "video", "pdf"} & set(in_modalities))
+
     # reasoning: only True when explicitly stated
     reasoning = info.get("supports_reasoning") is True
 
@@ -246,7 +337,7 @@ def build_entry(
     context = info.get("max_input_tokens") or existing_limit.get("context")
     output = info.get("max_output_tokens") or existing_limit.get("output")
 
-    # Try Chutes API for chutes-e2ee/* models
+    # Try Chutes API for chutes/* models
     if (context is None or output is None) and chutes_map:
         chutes_context, chutes_output = find_chutes_limits(model_id, chutes_map)
         if context is None and chutes_context is not None:
@@ -284,9 +375,34 @@ def build_entry(
     }
     if reasoning:
         entry["reasoning"] = True
+        # This provider surfaces thinking in the standard `reasoning_content`.
+        entry["interleaved"] = "reasoning_content"
+        variants = reasoning_variants(info)
+        if variants:
+            entry["variants"] = variants
     if attachment:
         entry["attachment"] = True
+    if in_modalities or out_modalities:
+        entry["modalities"] = {}
+        if in_modalities:
+            entry["modalities"]["input"] = list(in_modalities)
+        if out_modalities:
+            entry["modalities"]["output"] = list(out_modalities)
+
+    # release_date: Chutes `created` (unix) or the value carried in model_info.
+    release_date = info.get("release_date")
+    created = chutes_info.get("created")
+    if not release_date and isinstance(created, (int, float)) and created > 0:
+        release_date = time.strftime("%Y-%m-%d", time.gmtime(created))
+    if release_date:
+        entry["release_date"] = release_date
+
+    if chutes_map:
+        cost = find_chutes_cost(model_id, chutes_map)
+        if cost is not None:
+            entry["cost"] = cost
     entry["limit"] = {"context": context, "output": output}
+    entry["status"] = "active"
     return entry
 
 

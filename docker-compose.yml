@@ -7,7 +7,17 @@ services:
     volumes:
       - ./litellm-data:/app/data
     environment:
-      - CHUTES_API_KEY=${CHUTES_API_KEY}
+      - LITELLM_OUTPUT=/app/data/config.generated.yml
+      # Only providers whose key is set are expanded into the generated config;
+      # unset ones are skipped. Add more *_API_KEY values as needed.
+      - CHUTES_API_KEY=${CHUTES_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - META_API_KEY=${META_API_KEY:-}
+      - XAI_API_KEY=${XAI_API_KEY:-}
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main

@@ -1,0 +1,94 @@
+[project]
+name = "chutes-litellm-proxy"
+version = "0.1.0"
+description = "LiteLLM proxy with host-scoped Chutes E2EE (ML-KEM-768) transport and optional TEE/GPU attestation verification"
+readme = "README.md"
+requires-python = ">=3.13,<3.15"
+license = { text = "MIT" }
+dependencies = [
+    "litellm[proxy]>=1.100.0,<1.101.0",
+    "chutes-e2ee @ git+https://github.com/niozow/chutes-e2ee-transport.git",
+    "httpx>=0.27",
+    "openai>=1.40",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+# Hardware-root attestation. Both are optional: the base install (and the
+# offline test suite) works without them, and requesting
+# CHUTES_VERIFY_QUOTE=true / CHUTES_VERIFY_GPU=true without them fails closed
+# with an actionable error (see chutes_litellm.attestation).
+#
+#   uv sync --extra attestation
+#
+# dcap-qvl  : Intel DCAP / SGX-TDX quote verification (Rust extension, abi3 wheel)
+# nv-attestation-sdk : NVIDIA GPU evidence verification against NRAS (pure Python)
+attestation = [
+    "dcap-qvl>=0.6.3",
+    "nv-attestation-sdk>=2.7.3",
+]
+
+# `nv-attestation-sdk` ships overly-broad, mutually-exclusive pins (it declares
+# its *dev* tooling — pylint, twine, pytest — as install_requires, and pins
+# cryptography==43.0.1 / pyjwt<2.8, both older than what litellm requires). The
+# code it actually calls (x509 parsing, JWT decode, requests) is API-stable
+# across those versions, so force a single coherent set rather than a separate
+# sidecar interpreter. Only relevant with `--extra attestation`.
+[tool.uv]
+override-dependencies = [
+    "cryptography>=49.0.0,<51.0",
+    "pyjwt>=2.13.0,<3.0",
+    "requests>=2.32.3,<3.0",
+    "urllib3>=2.0",
+    # signxml==3.2.0 pins lxml==4.9.4, which predates cp313 wheels and has to
+    # be compiled (libxml2 headers). Force a current lxml with a prebuilt wheel.
+    "lxml>=5.3",
+    # pyOpenSSL 24.2.1 predates cryptography 49 and crashes at import
+    # (`module 'lib' has no attribute 'GEN_EMAIL'`). Force the current release.
+    "pyopenssl>=25.1",
+    # signxml 3.2.0 references `ec.SECT163K1`, removed in cryptography 49.
+    # Only its import chain is needed for the *remote* NRAS path.
+    "signxml>=4.4",
+]
+
+[project.scripts]
+# NB: litellm already ships its own `litellm-proxy` console script (an
+# interactive client), so the server entry point uses the chutes- prefix.
+chutes-litellm-proxy = "chutes_litellm.cli:litellm_proxy"
+chutes-verify-attestation = "chutes_litellm.verify:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chutes_litellm"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.dockerignore",
+    "/.gitignore",
+    "/.venv",
+    "/.ruff_cache",
+    "/.pytest_cache",
+    "/litellm",
+    "/tests/__pycache__",
+    "*.pyc",
+    "__pycache__",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
