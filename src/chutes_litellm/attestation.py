@@ -283,7 +283,12 @@ def verify_evidence(
     nonce = nonce or secrets.token_hex(32)
     digest = _digest_of(nonce, e2e_pubkey)
 
+    from chutes_litellm import get_logger
+
+    logger = get_logger("chutes_litellm.attestation")
     checks: dict[str, bool | None] = {}
+
+    logger.info("verify_evidence: instance=%s quote=%s gpu=%s", instance_id, verify_quote, verify_gpu)
 
     if check_signature:
         checks["key_possession"] = _signature_ok(evidence)
@@ -343,6 +348,10 @@ def verify_evidence(
     detail = ""
     if not verified:
         detail = "failed checks: " + ", ".join(sorted(failed))
+    if verified:
+        logger.info("verify_evidence: instance=%s VERIFIED checks=%s", instance_id, _format_checks(checks))
+    else:
+        logger.warning("verify_evidence: instance=%s FAILED %s checks=%s", instance_id, detail, _format_checks(checks))
     return VerificationResult(
         instance_id=instance_id,
         verified=verified,
@@ -681,6 +690,10 @@ def _cached_model_map(api_key: str, models_base: str) -> dict[str, str]:
         cached = _model_map_cache.get(key)
         if cached and now - cached[0] < _MODEL_MAP_TTL:
             return cached[1]
+    from chutes_litellm import get_logger
+
+    logger = get_logger("chutes_litellm.attestation")
+    logger.info("fetch_model_map: models_base=%s", models_base)
     mapping = fetch_model_map(api_key, models_base=models_base)
     with _model_map_lock:
         _model_map_cache[key] = (time.time(), mapping)
@@ -750,9 +763,14 @@ def _verify_instances(
     own discovery cache, so trusting a partially-verified chute would still let
     a request land on the unverified instance.
     """
+    from chutes_litellm import get_logger
+
+    logger = get_logger("chutes_litellm.attestation")
+    logger.info("_verify_instances: model=%s chute_id=%s quote=%s gpu=%s", model, chute_id, verify_quote, verify_gpu)
     instances = fetch_instances(api_key, chute_id, api_base=api_base)
     pubkeys = {inst.instance_id: inst.e2e_pubkey for inst in instances}
     if not pubkeys:
+        logger.warning("_verify_instances: model=%s chute_id=%s no instances listed at api=%s", model, chute_id, api_base)
         raise AttestationError(
             f"attestation failed for chute {chute_id} (model {model!r}): "
             f"no E2EE instances were listed for this chute at {api_base} — it may be "
@@ -760,6 +778,7 @@ def _verify_instances(
         )
 
     nonce = secrets.token_hex(32)
+    logger.info("_verify_instances: model=%s chute_id=%s instances=%s nonce=%s", model, chute_id, len(pubkeys), nonce)
     evidences = fetch_chute_evidence(api_key, chute_id, nonce, api_base=api_base)
 
     report = ChuteVerificationReport(
@@ -802,6 +821,11 @@ def _verify_instances(
         report.failures.append(
             f"{instance_id}: no attestation evidence returned for a listed E2EE instance"
         )
+    status = "VERIFIED" if report.ok else "FAILED"
+    logger.info(
+        "_verify_instances: model=%s chute_id=%s status=%s verified=%s/%s failed=%s unmatched=%s",
+        model, chute_id, status, len(report.verified), len(pubkeys), len(report.failures), report.unmatched,
+    )
     return report
 
 
@@ -899,6 +923,10 @@ def verify_chute(
     ``CHUTES_ATTESTATION_FAILURE_TTL`` seconds; concurrent cold-cache calls are
     coalesced into a single evidence fetch.
     """
+    from chutes_litellm import get_logger
+
+    logger = get_logger("chutes_litellm.attestation")
+
     api_base = api_base or os.environ.get("CHUTES_E2EE_API_BASE") or DEFAULT_API_BASE
     models_base = models_base or os.environ.get("CHUTES_E2EE_MODELS_BASE") or DEFAULT_MODELS_BASE
 
@@ -909,6 +937,7 @@ def verify_chute(
         model_map = _cached_model_map(api_key, models_base)
         chute_id = model_map.get(model)
         if chute_id is None:
+            logger.warning("verify_chute: model=%s not found in %s/v1/models", model, models_base)
             raise AttestationError(f"model {model!r} not found in {models_base}/v1/models")
 
     cache_key = (chute_id, verify_quote, verify_gpu, check_signature)
@@ -928,8 +957,12 @@ def verify_chute(
     if hit is not None:
         verified_ids, error = hit
         if error:
+            logger.info("verify_chute: model=%s chute_id=%s cache=HIT (failure)", model, chute_id)
             raise AttestationError(error)
+        logger.info("verify_chute: model=%s chute_id=%s cache=HIT verified=%s", model, chute_id, len(verified_ids))
         return verified_ids
+
+    logger.info("verify_chute: model=%s chute_id=%s cache=MISS quote=%s gpu=%s", model, chute_id, verify_quote, verify_gpu)
 
     # Single-flight: the first caller fetches; the rest wait for its outcome and
     # then re-check the cache (or, if the leader died without caching, try too).
@@ -942,6 +975,7 @@ def verify_chute(
 
     try:
         if not leader:
+            logger.info("verify_chute: model=%s chute_id=%s waiting for leader", model, chute_id)
             event.wait(timeout=120)
             with _verify_lock:
                 hit = _fresh()
@@ -960,9 +994,11 @@ def verify_chute(
         except AttestationError as exc:
             with _verify_lock:
                 _verify_cache[cache_key] = (time.time(), [], str(exc))
+            logger.warning("verify_chute: model=%s chute_id=%s FAILED %s", model, chute_id, exc)
             raise
         with _verify_lock:
             _verify_cache[cache_key] = (time.time(), verified, None)
+        logger.info("verify_chute: model=%s chute_id=%s VERIFIED instances=%s", model, chute_id, len(verified))
         return verified
     finally:
         if leader:

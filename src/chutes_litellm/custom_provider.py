@@ -182,10 +182,13 @@ def _attestation_instance_filter(api_key: str, verify_quote: bool, verify_gpu: b
     """
 
     def _filter(chute_id: str, instances: list) -> list:
+        from chutes_litellm import get_logger
         from .attestation import AttestationError, verify_chute
         from .e2ee_litellm import _attestation_failure
 
+        logger = get_logger("chutes_litellm.custom_provider")
         try:
+            logger.info("instance_filter: chute_id=%s quote=%s gpu=%s", chute_id, verify_quote, verify_gpu)
             verified = verify_chute(
                 api_key,
                 chute_id,
@@ -193,8 +196,10 @@ def _attestation_instance_filter(api_key: str, verify_quote: bool, verify_gpu: b
                 verify_gpu=verify_gpu,
             )
         except AttestationError as exc:
+            logger.warning("instance_filter: chute_id=%s FAILED %s", chute_id, exc)
             raise _attestation_failure(chute_id, exc) from exc
         allowed = set(verified)
+        logger.info("instance_filter: chute_id=%s allowed=%s/%s", chute_id, len(allowed), len(instances))
         return [inst for inst in instances if inst.instance_id in allowed]
 
     return _filter
@@ -279,10 +284,13 @@ def _maybe_verify_attestation(api_key: str, model: str) -> None:
     """
     if not _env_bool("CHUTES_VERIFY_ATTESTATION"):
         return
+    from chutes_litellm import get_logger
     from .attestation import AttestationError, verify_model
     from .e2ee_litellm import _attestation_failure
 
+    logger = get_logger("chutes_litellm.custom_provider")
     wire_model = _clean_model(model)
+    logger.info("_maybe_verify_attestation: model=%s quote=%s gpu=%s", wire_model, _env_bool("CHUTES_VERIFY_QUOTE"), _env_bool("CHUTES_VERIFY_GPU"))
     try:
         verify_model(
             api_key,
@@ -291,6 +299,7 @@ def _maybe_verify_attestation(api_key: str, model: str) -> None:
             verify_gpu=_env_bool("CHUTES_VERIFY_GPU"),
         )
     except AttestationError as exc:
+        logger.warning("_maybe_verify_attestation: model=%s FAILED %s", wire_model, exc)
         raise _attestation_failure(wire_model, exc) from exc
 
 

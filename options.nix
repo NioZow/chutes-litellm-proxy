@@ -176,6 +176,26 @@ in {
       default = "llm.chutes.ai,api.chutes.ai";
       description = "Comma-separated hosts whose traffic is end-to-end encrypted (CHUTES_E2EE_HOSTS).";
     };
+
+    logLevel = lib.mkOption {
+      type = lib.types.str;
+      default = "info";
+      description = ''
+        Logging level for the chutes_litellm logger: debug, info, warning,
+        error or critical (CHUTES_LOG_LEVEL).
+      '';
+    };
+
+    logFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Path to a log file for the proxy. When null, the default
+        <literal>~/.local/state/chutes_litellm/proxy.log</literal> is used (or
+        nothing if the directory is not writable). Set to <literal>"none"</literal>
+        to disable file logging entirely (CHUTES_LOG_FILE).
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -216,10 +236,12 @@ in {
             "CHUTES_E2EE_API_BASE=${cfg.e2eeApiBase}"
             "CHUTES_E2EE_MODELS_BASE=${cfg.e2eeModelsBase}"
             "CHUTES_E2EE_HOSTS=${cfg.e2eeHosts}"
+            "CHUTES_LOG_LEVEL=${cfg.logLevel}"
           ]
           ++ lib.optional (cfg.configTemplate != null) "LITELLM_TEMPLATE=${toString cfg.configTemplate}"
           ++ lib.optional (cfg.dcapPccsUrl != null) "CHUTES_DCAP_PCCS_URL=${cfg.dcapPccsUrl}"
           ++ lib.optional (cfg.nvidiaNrasUrl != null) "CHUTES_NVIDIA_NRAS_URL=${cfg.nvidiaNrasUrl}"
+          ++ lib.optional (cfg.logFile != null) "CHUTES_LOG_FILE=${cfg.logFile}"
           ++ apiKeyEnv;
       };
     };

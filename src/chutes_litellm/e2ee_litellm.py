@@ -170,6 +170,10 @@ class _ChutesScopedTransport(httpx.BaseTransport):
         model = _json_model(request.content)
         if model is None:
             return
+        from chutes_litellm import get_logger
+
+        logger = get_logger("chutes_litellm.e2ee")
+        logger.info("_maybe_verify: model=%s quote=%s gpu=%s", model, self._verify_quote, self._verify_gpu)
         try:
             verify_model(
                 self._api_key_provider(),
@@ -178,6 +182,7 @@ class _ChutesScopedTransport(httpx.BaseTransport):
                 verify_gpu=self._verify_gpu,
             )
         except AttestationError as exc:
+            logger.warning("_maybe_verify: model=%s FAILED %s", model, exc)
             raise _attestation_failure(model, exc) from exc
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -257,6 +262,10 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
         model = _json_model(request.content)
         if model is None:
             return
+        from chutes_litellm import get_logger
+
+        logger = get_logger("chutes_litellm.e2ee")
+        logger.info("_maybe_verify(async): model=%s quote=%s gpu=%s", model, self._verify_quote, self._verify_gpu)
         try:
             await asyncio.to_thread(
                 verify_model,
@@ -266,6 +275,7 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
                 verify_gpu=self._verify_gpu,
             )
         except AttestationError as exc:
+            logger.warning("_maybe_verify(async): model=%s FAILED %s", model, exc)
             raise _attestation_failure(model, exc) from exc
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:

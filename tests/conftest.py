@@ -17,6 +17,8 @@ os.environ.setdefault("CHUTES_E2EE_VERIFY_SSL", "false")
 os.environ["CHUTES_VERIFY_ATTESTATION"] = "false"
 os.environ["CHUTES_VERIFY_QUOTE"] = "false"
 os.environ["CHUTES_VERIFY_GPU"] = "false"
+# Avoid writing to the default log file during tests; logs still go to stderr.
+os.environ.setdefault("CHUTES_LOG_FILE", "none")
 
 from chutes_litellm import attestation, e2ee_litellm  # noqa: E402
 from mock_chutes_server import MockChutesServer  # noqa: E402
@@ -62,6 +64,14 @@ def _reset_litellm_clients():
     attestation._verify_cache.clear()
     attestation._model_map_cache.clear()
     attestation.close_shared_http()
+    # Reset the shared logger so each test gets a fresh handler set.
+    import chutes_litellm
+    import logging
+
+    chutes_litellm._logger = None
+    log = logging.getLogger("chutes_litellm")
+    log.handlers.clear()
+    log.setLevel(logging.NOTSET)
     yield
 
 

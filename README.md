@@ -553,6 +553,10 @@ Relevant environment variables:
 | `CHUTES_ATTESTATION_MODEL_MAP_TTL` | `300`               | How long a model→chute id lookup is cached (seconds) |
 | `CHUTES_DCAP_PCCS_URL`      | dcap-qvl default (Phala `pccs.phala.network`) | Intel/Phala collateral (PCCS) base for DCAP |
 | `CHUTES_NVIDIA_NRAS_URL`    | `https://nras.attestation.nvidia.com/v3/attest/gpu` | NVIDIA remote attestation (NRAS) endpoint |
+| `CHUTES_LOG_LEVEL`          | `info`                      | Logger level: debug, info, warning, error, critical  |
+| `CHUTES_LOG_FILE`           | `~/.local/state/chutes_litellm/proxy.log` | Optional log file path; set `none` to disable |
+
+**Logging.** All attestation and E2EE events are emitted through a shared logger that writes to both stderr (visible in `docker logs`, `journalctl`, launchd logfiles, etc.) and an optional on-disk file.  The file path defaults to `~/.local/state/chutes_litellm/proxy.log` and is overridable via `CHUTES_LOG_FILE` (set to `none` to disable file logging).  The level is controlled by `CHUTES_LOG_LEVEL` (default `info`).
 
 **Overhead.** Attestation is **on by default**, so every request is guarded. This
 trusts that the proxy verifies TEE/GPU evidence before encrypting traffic. You can opt out by setting `CHUTES_VERIFY_ATTESTATION=false`, but that removes all guarantees that the instance you are talking to is running on trusted hardware.
