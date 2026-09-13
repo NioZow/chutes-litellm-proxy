@@ -80,6 +80,22 @@
     // lib.optionalAttrs (cfg.dcapPccsUrl != null) {CHUTES_DCAP_PCCS_URL = cfg.dcapPccsUrl;}
     // lib.optionalAttrs (cfg.nvidiaNrasUrl != null) {CHUTES_NVIDIA_NRAS_URL = cfg.nvidiaNrasUrl;}
     // lib.optionalAttrs (cfg.logFile != null) {CHUTES_LOG_FILE = cfg.logFile;}
+    // lib.optionalAttrs (cfg.httpProxy != null) {
+      HTTP_PROXY = cfg.httpProxy;
+      http_proxy = cfg.httpProxy;
+    }
+    // lib.optionalAttrs (cfg.httpsProxy != null) {
+      HTTPS_PROXY = cfg.httpsProxy;
+      https_proxy = cfg.httpsProxy;
+    }
+    // lib.optionalAttrs (cfg.allProxy != null) {
+      ALL_PROXY = cfg.allProxy;
+      all_proxy = cfg.allProxy;
+    }
+    // lib.optionalAttrs (cfg.noProxy != null) {
+      NO_PROXY = cfg.noProxy;
+      no_proxy = cfg.noProxy;
+    }
     // apiKeyEnv;
 
   # systemd hardening, tuned per scope. `DynamicUser` and the capability
@@ -125,6 +141,50 @@ in {
       type = lib.types.port;
       default = 4000;
       description = "Port the proxy listens on.";
+    };
+
+    httpProxy = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "http://10.200.0.9:3128";
+      description = ''
+        HTTP proxy URL exported to the service as both `HTTP_PROXY` and
+        `http_proxy`. When null, neither variable is set. Every outbound
+        provider request made by the proxy (model listing, attestation, chat
+        completions) honours this.
+      '';
+    };
+
+    httpsProxy = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "http://10.200.0.9:3128";
+      description = ''
+        HTTPS proxy URL exported to the service as both `HTTPS_PROXY` and
+        `https_proxy`. When null, neither variable is set. Usually the same as
+        `httpProxy` for a plain HTTP CONNECT proxy.
+      '';
+    };
+
+    allProxy = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "http://10.200.0.9:3128";
+      description = ''
+        Catch-all proxy URL exported to the service as both `ALL_PROXY` and
+        `all_proxy`. When null, neither variable is set.
+      '';
+    };
+
+    noProxy = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "localhost,127.0.0.1,.trs,10.200.0.0/24";
+      description = ''
+        Comma-separated bypass list exported to the service as both `NO_PROXY`
+        and `no_proxy`. When null, neither variable is set. Use it for internal
+        hosts and the proxy endpoint itself so they are reached directly.
+      '';
     };
 
     apiKeys = lib.mkOption {
