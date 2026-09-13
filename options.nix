@@ -61,6 +61,10 @@
   environment =
     {
       PYTHONUNBUFFERED = "1";
+      # Use the model cost map bundled in the litellm wheel instead of fetching
+      # it from raw.githubusercontent.com at import time. Keeps startup offline
+      # (and behind an allowlisting forward proxy) and matches the test suite.
+      LITELLM_LOCAL_MODEL_COST_MAP = "true";
       LITELLM_HOST = cfg.host;
       LITELLM_PORT = toString cfg.port;
       LITELLM_OUTPUT = outputPath;
