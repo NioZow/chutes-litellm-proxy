@@ -51,6 +51,14 @@ override-dependencies = [
     "signxml>=4.4",
 ]
 
+# NB (CVE-2024-23342): `python-ecdsa` is a transitive dep of `nv-attestation-sdk`
+# and is covered by the "Minerva" timing side-channel advisory, which affects
+# the library's private-key operations (ECDSA signing / nonce derivation). The
+# NVIDIA verifiers use it *only* for public-key signature verification
+# (`VerifyingKey.from_pem(...).verify(...)`), never for signing, so there is no
+# secret-key/side-channel exposure on this path. The Nix build strips the
+# advisory for this dependency; see the `ecdsa` override in flake.nix.
+
 [project.scripts]
 # NB: litellm already ships its own `litellm-proxy` console script (an
 # interactive client), so the server entry point uses the chutes- prefix.

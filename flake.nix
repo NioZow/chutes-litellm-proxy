@@ -192,6 +192,21 @@
         doCheck = false;
       };
 
+      # CVE-2024-23342 (the "Minerva" attack) is a timing side-channel in
+      # python-ecdsa's *private-key* operations (ECDSA signing / nonce
+      # derivation); it requires the secret key to be present.  NVIDIA's GPU
+      # and switch attestation verifiers only ever verify signatures: both
+      # import just `VerifyingKey` + `BadSignatureError` and call
+      # `VerifyingKey.from_pem(cert_pubkey).verify(...)` — see
+      # nv_local_gpu_verifier/verifier/attestation/__init__.py.  Verification
+      # uses public key material only and is not exposed to the side channel.
+      # nixpkgs flags the whole package insecure regardless, so we strip the
+      # advisory for this verification-only dependency instead of globally
+      # permitting insecure packages.
+      ecdsa = python.pkgs.ecdsa.overridePythonAttrs (old: {
+        meta = (old.meta or {}) // {knownVulnerabilities = [];};
+      });
+
       # NVIDIA local GPU verifier (`import verifier`), a runtime dep of the
       # nv-attestation-sdk import chain.  Its PyPI metadata pins ancient
       # versions (cryptography==43, signxml==3.2); we use nixpkgs' current
@@ -201,19 +216,20 @@
         version = "2.7.3";
         format = "wheel";
         src = nvLocalGpuVerifierWheel pkgs;
-        propagatedBuildInputs = with python.pkgs; [
-          asn1
-          cryptography
-          ecdsa
-          lxml
-          nvidia-ml-py
-          pyjwt
-          pyopenssl
-          requests
-          signxml
-          urllib3
-          xmlschema
-        ];
+        propagatedBuildInputs =
+          [ecdsa]
+          ++ (with python.pkgs; [
+            asn1
+            cryptography
+            lxml
+            nvidia-ml-py
+            pyjwt
+            pyopenssl
+            requests
+            signxml
+            urllib3
+            xmlschema
+          ]);
         doCheck = false;
       };
 
@@ -225,18 +241,19 @@
         version = "2.7.3";
         format = "wheel";
         src = nvAttestationSdkWheel pkgs;
-        propagatedBuildInputs = with python.pkgs; [
-          cryptography
-          ecdsa
-          nv-local-gpu-verifier
-          nvidia-ml-py
-          pyjwt
-          pyopenssl
-          requests
-          signxml
-          urllib3
-          xmlschema
-        ];
+        propagatedBuildInputs =
+          [ecdsa]
+          ++ (with python.pkgs; [
+            cryptography
+            nv-local-gpu-verifier
+            nvidia-ml-py
+            pyjwt
+            pyopenssl
+            requests
+            signxml
+            urllib3
+            xmlschema
+          ]);
         doCheck = false;
       };
     in

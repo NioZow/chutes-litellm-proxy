@@ -472,6 +472,20 @@ OpenAI-compatible provider) and layers the encryption on underneath it:
   and set `CHUTES_VERIFY_QUOTE=true` / `CHUTES_VERIFY_GPU=true` (honoured by both
   the native transport and the custom provider).  See
   [docs/attestation.md](./docs/attestation.md) for the full trust chain.
+
+  > **Note — `python-ecdsa` (CVE-2024-23342).** The Nix build pins
+  > `python-ecdsa`, a transitive dependency of `nv-attestation-sdk` /
+  > `nv-local-gpu-verifier`, which nixpkgs flags as insecure for
+  > CVE-2024-23342 (the "Minerva" timing side-channel). That flaw lives in the
+  > library's **private-key** operations (ECDSA signing / nonce derivation) and
+  > requires the secret key to be present. The NVIDIA code only ever *verifies*
+  > signatures: it imports just `VerifyingKey` + `BadSignatureError` and calls
+  > `VerifyingKey.from_pem(cert_public_key).verify(...)`, which uses public key
+  > material only and is not exposed to the side channel. The flake therefore
+  > drops the advisory for this verification-only dependency (`ecdsa` override
+  > in `flake.nix`) rather than globally permitting insecure packages. No code
+  > path signs with this library.
+
 * `scripts/verify_attestation.py` — standalone CLI to verify a model/chute
   against the live API (see below); `--details` prints per-instance checks, the
   DCAP TCB status and NVIDIA GPU verdicts.
