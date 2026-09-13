@@ -1,13 +1,26 @@
-# NixOS module for the LiteLLM proxy (with the Chutes E2EE provider).
+# NixOS / home-manager module for the LiteLLM proxy (with the Chutes E2EE
+# provider).
 #
-# Import this from a NixOS configuration and enable it with:
+# The module is a function of a small record supplied by `flake.nix`, so the
+# exact same option set (and CLI wiring) is reused for three deployments:
+#
+#   * scope = "system", isHomeManager = false, isDarwin = false -> NixOS root service
+#   * scope = "user",   isHomeManager = false, isDarwin = false -> NixOS user  service
+#   * scope = "user",   isHomeManager = true                   -> home-manager user service
+#
+# `mkService` is already bound to the matching `nix-services` schema. `scope`
+# must be a *literal* (it decides the shape of the emitted fragment:
+# `systemd.services` vs `systemd.user.services` vs `launchd.agents`), which is
+# why each deployment gets its own module instance instead of a `scope` option.
+#
+# Enable it from the host/home config with:
 #
 #   services.litellm = {
 #     enable = true;
 #     apiKeys = {
-#       CHUTES_API_KEY_PATH     = config.age.secrets."litellm/chutes".path;
-#       ANTHROPIC_API_KEY_PATH  = config.age.secrets."litellm/anthropic".path;
-#       OPENAI_API_KEY          = "sk-abc123";
+#       CHUTES_API_KEY_PATH    = config.age.secrets."litellm/chutes".path;
+#       ANTHROPIC_API_KEY_PATH = config.age.secrets."litellm/anthropic".path;
+#       OPENAI_API_KEY         = "sk-abc123";
 #     };
 #   };
 #
@@ -16,14 +29,83 @@
 # Use *_PATH suffixes when you want the proxy to read the key from a file at
 # runtime; use the plain *_API_KEY name when you want to pass the key directly.
 {
+  mkService,
+  scope ? "system",
+  isHomeManager ? false,
+  isDarwin ? false,
+  # NixOS-only: enables `networking.firewall` handling. Never set under HM.
+  withFirewall ? (scope == "system"),
+}: {
   config,
   lib,
   ...
 }: let
   cfg = config.services.litellm;
+  isSystem = scope == "system";
 
-  # Forward apiKeys directly into the service environment.
-  apiKeyEnv = lib.mapAttrsToList (name: value: "${name}=${toString value}") cfg.apiKeys;
+  # Forward apiKeys directly into the service environment. Values may be raw
+  # strings (forwarded as-is) or paths (e.g. secret files).
+  apiKeyEnv = lib.mapAttrs (name: value: toString value) cfg.apiKeys;
+
+  # Where the generated config is written.
+  #   systemd (system) -> `%S` expands to /var/lib; StateDirectory=litellm
+  #                       creates /var/lib/litellm.
+  #   systemd (user)   -> `%S` expands to ~/.local/state; StateDirectory=litellm
+  #                       creates ~/.local/state/litellm.
+  #   launchd          -> no `%` specifier expansion, so use an absolute path.
+  outputPath =
+    if isHomeManager && isDarwin
+    then "${config.home.homeDirectory}/.local/state/litellm/config.generated.yml"
+    else "%S/litellm/config.generated.yml";
+
+  environment =
+    {
+      PYTHONUNBUFFERED = "1";
+      LITELLM_HOST = cfg.host;
+      LITELLM_PORT = toString cfg.port;
+      LITELLM_OUTPUT = outputPath;
+      CHUTES_VERIFY_ATTESTATION = lib.boolToString cfg.verifyAttestation;
+      CHUTES_VERIFY_QUOTE = lib.boolToString cfg.verifyQuote;
+      CHUTES_VERIFY_GPU = lib.boolToString cfg.verifyGpu;
+      CHUTES_ATTESTATION_TTL = toString cfg.attestationTtl;
+      CHUTES_ATTESTATION_FAILURE_TTL = toString cfg.attestationFailureTtl;
+      CHUTES_ATTESTATION_MODEL_MAP_TTL = toString cfg.attestationModelMapTtl;
+      CHUTES_CUSTOM_PROVIDER = lib.boolToString cfg.customProvider;
+      CHUTES_E2EE_API_BASE = cfg.e2eeApiBase;
+      CHUTES_E2EE_MODELS_BASE = cfg.e2eeModelsBase;
+      CHUTES_E2EE_HOSTS = cfg.e2eeHosts;
+      CHUTES_LOG_LEVEL = cfg.logLevel;
+    }
+    // lib.optionalAttrs (cfg.configTemplate != null) {LITELLM_TEMPLATE = toString cfg.configTemplate;}
+    // lib.optionalAttrs (cfg.dcapPccsUrl != null) {CHUTES_DCAP_PCCS_URL = cfg.dcapPccsUrl;}
+    // lib.optionalAttrs (cfg.nvidiaNrasUrl != null) {CHUTES_NVIDIA_NRAS_URL = cfg.nvidiaNrasUrl;}
+    // lib.optionalAttrs (cfg.logFile != null) {CHUTES_LOG_FILE = cfg.logFile;}
+    // apiKeyEnv;
+
+  # systemd hardening, tuned per scope. `DynamicUser` and the capability
+  # directives are only valid for system services. User services already run
+  # unprivileged, so they get a conservative subset (no `ProtectSystem`/
+  # `ProtectHome`, which could block writes under the user's state dir).
+  hardening =
+    if isSystem
+    then {
+      DynamicUser = true;
+      StateDirectory = "litellm";
+      StateDirectoryMode = "0700";
+      AmbientCapabilities = [];
+      CapabilityBoundingSet = [];
+      NoNewPrivileges = true;
+      PrivateTmp = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      ReadWritePaths = ["/var/lib/litellm"];
+    }
+    else {
+      StateDirectory = "litellm";
+      StateDirectoryMode = "0700";
+      NoNewPrivileges = true;
+      PrivateTmp = true;
+    };
 in {
   options.services.litellm = {
     enable = lib.mkEnableOption "LiteLLM proxy (Chutes E2EE)";
@@ -198,54 +280,28 @@ in {
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    systemd.services.litellm = {
-      description = "LiteLLM proxy (Chutes E2EE)";
-      wantedBy = ["multi-user.target"];
-      after = ["network-online.target"];
-      wants = ["network-online.target"];
-
-      serviceConfig = {
-        Type = "simple";
-        ExecStart = "${cfg.package}/bin/litellm-proxy";
-        Restart = "on-failure";
-        RestartSec = 5;
-        DynamicUser = true;
-        StateDirectory = "litellm";
-        StateDirectoryMode = "0700";
-        AmbientCapabilities = [];
-        CapabilityBoundingSet = [];
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        ReadWritePaths = ["/var/lib/litellm"];
-        Environment =
-          [
-            "PYTHONUNBUFFERED=1"
-            "LITELLM_HOST=${cfg.host}"
-            "LITELLM_PORT=${toString cfg.port}"
-            "LITELLM_OUTPUT=/var/lib/litellm/config.generated.yml"
-            "CHUTES_VERIFY_ATTESTATION=${lib.boolToString cfg.verifyAttestation}"
-            "CHUTES_VERIFY_QUOTE=${lib.boolToString cfg.verifyQuote}"
-            "CHUTES_VERIFY_GPU=${lib.boolToString cfg.verifyGpu}"
-            "CHUTES_ATTESTATION_TTL=${toString cfg.attestationTtl}"
-            "CHUTES_ATTESTATION_FAILURE_TTL=${toString cfg.attestationFailureTtl}"
-            "CHUTES_ATTESTATION_MODEL_MAP_TTL=${toString cfg.attestationModelMapTtl}"
-            "CHUTES_CUSTOM_PROVIDER=${lib.boolToString cfg.customProvider}"
-            "CHUTES_E2EE_API_BASE=${cfg.e2eeApiBase}"
-            "CHUTES_E2EE_MODELS_BASE=${cfg.e2eeModelsBase}"
-            "CHUTES_E2EE_HOSTS=${cfg.e2eeHosts}"
-            "CHUTES_LOG_LEVEL=${cfg.logLevel}"
-          ]
-          ++ lib.optional (cfg.configTemplate != null) "LITELLM_TEMPLATE=${toString cfg.configTemplate}"
-          ++ lib.optional (cfg.dcapPccsUrl != null) "CHUTES_DCAP_PCCS_URL=${cfg.dcapPccsUrl}"
-          ++ lib.optional (cfg.nvidiaNrasUrl != null) "CHUTES_NVIDIA_NRAS_URL=${cfg.nvidiaNrasUrl}"
-          ++ lib.optional (cfg.logFile != null) "CHUTES_LOG_FILE=${cfg.logFile}"
-          ++ apiKeyEnv;
-      };
-    };
-
-    networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [cfg.port];
-  };
+  config = lib.mkIf cfg.enable (
+    (mkService (
+      {
+        name = "litellm";
+        description = "LiteLLM proxy (Chutes E2EE)";
+        command = "${cfg.package}/bin/litellm-proxy";
+        inherit scope;
+        environment = environment;
+        extraSystemdServiceConfig = hardening;
+        # launchd (home-manager) needs an absolute log dir; systemd ignores it.
+        logDir =
+          if isHomeManager
+          then "${config.home.homeDirectory}/Library/Logs"
+          else null;
+      }
+      // lib.optionalAttrs isSystem {
+        after = ["network-online.target"];
+        wants = ["network-online.target"];
+      }
+    ))
+    // lib.optionalAttrs withFirewall {
+      networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [cfg.port];
+    }
+  );
 }

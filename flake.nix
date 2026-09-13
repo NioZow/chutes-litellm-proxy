@@ -3,11 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nix-services.url = "github:niozow/nix-service";
   };
 
   outputs = {
     self,
     nixpkgs,
+    nix-services,
   }: let
     lib = nixpkgs.lib;
     # aarch64-darwin is supported because pqcrypto 0.4.0 ships a macOS arm64
@@ -129,9 +131,7 @@
     # -----------------------------------------------------------------------
     # Python environment shared by the dev shell and the packaged proxy.
     # -----------------------------------------------------------------------
-    mkChutesPython = pkgs: {
-      withAttestation ? false,
-    }: let
+    mkChutesPython = pkgs: {withAttestation ? false}: let
       python = pkgs.python3;
 
       pqcrypto = python.pkgs.buildPythonPackage {
@@ -241,23 +241,24 @@
       };
     in
       python.withPackages (
-        ps: [
-          # litellm with the `proxy` (+ runtime) extras so the HTTP proxy works.
-          (ps.litellm.overridePythonAttrs (old: {
-            dependencies =
-              old.dependencies
-              ++ (old.optional-dependencies.proxy or [])
-              ++ (old.optional-dependencies.proxy-runtime or []);
-            optional-dependencies = {};
-          }))
-          ps.openai
-          chutes-e2ee
-          expression
-        ]
-        ++ lib.optionals withAttestation [
-          dcap-qvl
-          nv-attestation-sdk
-        ]
+        ps:
+          [
+            # litellm with the `proxy` (+ runtime) extras so the HTTP proxy works.
+            (ps.litellm.overridePythonAttrs (old: {
+              dependencies =
+                old.dependencies
+                ++ (old.optional-dependencies.proxy or [])
+                ++ (old.optional-dependencies.proxy-runtime or []);
+              optional-dependencies = {};
+            }))
+            ps.openai
+            chutes-e2ee
+            expression
+          ]
+          ++ lib.optionals withAttestation [
+            dcap-qvl
+            nv-attestation-sdk
+          ]
       );
 
     # -----------------------------------------------------------------------
@@ -265,9 +266,7 @@
     # included) plus the Python environment, and launches it via the CLI entry
     # point (generate_config -> E2EE install -> litellm).
     # -----------------------------------------------------------------------
-    mkProxy = pkgs: {
-      withAttestation ? false,
-    }: let
+    mkProxy = pkgs: {withAttestation ? false}: let
       env = mkChutesPython pkgs {inherit withAttestation;};
     in
       pkgs.stdenv.mkDerivation {
@@ -306,6 +305,35 @@
           license = lib.licenses.mit;
         };
       };
+
+    # -----------------------------------------------------------------------
+    # Shared service-module builder. `scope`, `isDarwin` and `homeManager` are
+    # *constants* per output: they decide which unit schema `nix-services` emits,
+    # and that shape is forced during module merge, so they must not be read
+    # from `pkgs`/`config` (that would recurse). See the nix-services README.
+    # -----------------------------------------------------------------------
+    mkServiceModule = {
+      scope,
+      isDarwin ? false,
+      homeManager ? false,
+    }: {
+      lib,
+      pkgs,
+      ...
+    }: {
+      imports = [
+        ((import ./options.nix) {
+          mkService = nix-services.lib.mkService {
+            inherit lib isDarwin homeManager;
+            username = "root";
+          };
+          inherit scope isDarwin;
+          isHomeManager = homeManager;
+          withFirewall = !homeManager;
+        })
+      ];
+      services.litellm.package = lib.mkDefault (mkProxy pkgs {withAttestation = true;});
+    };
   in {
     packages = forAllSystems (
       system: let
@@ -360,13 +388,29 @@
       }
     );
 
-    nixosModules.default = {
-      lib,
-      pkgs,
-      ...
-    }: {
-      imports = [./options.nix];
-      services.litellm.package = lib.mkDefault (mkProxy pkgs {withAttestation = true;});
+    # -----------------------------------------------------------------------
+    # Service modules, all sharing options.nix:
+    #
+    #   nixosModules.default  NixOS system service (root)
+    #   nixosModules.user     NixOS user service (systemd --user, declared in NixOS config)
+    #   homeModules.default   home-manager user service (Linux, systemd --user)
+    #   homeModules.darwin    home-manager user service (macOS, launchd)
+    # -----------------------------------------------------------------------
+    nixosModules = {
+      default = mkServiceModule {scope = "system";};
+      user = mkServiceModule {scope = "user";};
+    };
+
+    homeModules = {
+      default = mkServiceModule {
+        scope = "user";
+        homeManager = true;
+      };
+      darwin = mkServiceModule {
+        scope = "user";
+        homeManager = true;
+        isDarwin = true;
+      };
     };
   };
 }
