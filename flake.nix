@@ -230,6 +230,12 @@
             urllib3
             xmlschema
           ]);
+        # The wheel's METADATA pins exact versions (ecdsa==0.18.0,
+        # cryptography==43.0.1, ...) which we intentionally do not honour: we
+        # run against nixpkgs' current versions, so the runtime-dependency
+        # check can never pass.  `doCheck` does not suppress this pre-install
+        # hook; `dontCheckRuntimeDeps` does.
+        dontCheckRuntimeDeps = true;
         doCheck = false;
       };
 
@@ -254,6 +260,7 @@
             urllib3
             xmlschema
           ]);
+        dontCheckRuntimeDeps = true;
         doCheck = false;
       };
     in
