@@ -34,6 +34,11 @@ model_list:
       model: "meta/*"
       api_key: "os.environ/META_API_KEY"
 
+  - model_name: "mistral/*"
+    litellm_params:
+      model: "mistral/*"
+      api_key: "os.environ/MISTRAL_API_KEY"
+
   - model_name: "chutes/*"
     litellm_params:
       model: "chutes/*"

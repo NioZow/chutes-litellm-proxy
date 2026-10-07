@@ -63,6 +63,7 @@ SDKs fails closed (the request is refused).
 | xAI         | `XAI_API_KEY`        | `xai/`         |
 | DeepSeek    | `DEEPSEEK_API_KEY`   | `deepseek/`    |
 | Meta        | `META_API_KEY`       | `meta/`        |
+| Mistral     | `MISTRAL_API_KEY`    | `mistral/`     |
 | Chutes TEE (E2EE) | `CHUTES_API_KEY`    | `chutes/`      |
 
 > **Native `_PATH` support:** Instead of setting `ANTHROPIC_API_KEY=sk-…` directly,

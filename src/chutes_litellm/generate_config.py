@@ -70,6 +70,12 @@ SKIP_GEMINI = {
     "embedding",
 }
 
+SKIP_MISTRAL = {
+    "mistral-embed",
+    "codestral-embed",
+    "mistral-moderation",
+}
+
 
 def fetch_anthropic(api_key: str) -> list[str]:
     r = httpx.get(
@@ -128,6 +134,17 @@ def fetch_openai_compat(api_key: str, base_url: str) -> list[str]:
     return [m["id"] for m in r.json()["data"]]
 
 
+def fetch_mistral(api_key: str) -> list[str]:
+    r = httpx.get(
+        "https://api.mistral.ai/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    all_ids = [m["id"] for m in r.json()["data"]]
+    return sorted(m for m in all_ids if not any(m.startswith(p) for p in SKIP_MISTRAL))
+
+
 # ---------------------------------------------------------------------------
 # Provider registry
 # ---------------------------------------------------------------------------
@@ -160,6 +177,10 @@ PROVIDERS: dict[str, dict] = {
     "meta": {
         "env": "META_API_KEY",
         "fetch": lambda key: fetch_openai_compat(key, "https://api.meta.ai/v1"),
+    },
+    "mistral": {
+        "env": "MISTRAL_API_KEY",
+        "fetch": fetch_mistral,
     },
     "chutes": {
         "env": "CHUTES_API_KEY",
