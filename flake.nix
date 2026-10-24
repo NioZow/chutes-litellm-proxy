@@ -295,10 +295,11 @@
           SHARE="$SELF_DIR/../share/litellm"
           export PYTHONPATH="$SHARE/src:''${PYTHONPATH:-}"
 
-          # Runs generate_config -> E2EE transport install -> litellm.
-          # LITELLM_TEMPLATE / LITELLM_OUTPUT / LITELLM_HOST / LITELLM_PORT are
-          # honoured via the environment (see chutes_litellm.cli).
-          exec python -m chutes_litellm.cli
+          # Runs generate_config -> E2EE transport install -> in-process litellm server.
+          # CLI flags (--config/--host/--port) and the LITELLM_TEMPLATE /
+          # LITELLM_OUTPUT / LITELLM_HOST / LITELLM_PORT environment variables are
+          # both honoured (see chutes_litellm.cli).
+          exec python -m chutes_litellm.cli "$@"
           EOF
           chmod +x $out/bin/litellm-proxy
 

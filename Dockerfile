@@ -38,5 +38,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Runs generate_config -> E2EE transport install -> litellm (see chutes_litellm.cli).
+# Runs generate_config -> E2EE transport install -> in-process litellm server
+# (see chutes_litellm.cli).
 ENTRYPOINT ["python", "-m", "chutes_litellm.cli"]

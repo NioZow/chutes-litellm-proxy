@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Run the Chutes-aware LiteLLM proxy in-process, for live/E2E testing.
 
-Unlike the deployed console entry point (``chutes-litellm-proxy``, which
-``os.execvp``-es the ``litellm`` CLI and therefore *discards* in-memory
-registrations), this launcher keeps the custom ``chutes_e2ee`` provider and the
-optional host-scoped E2EE transport installed in the same process that serves
-HTTP.  It is what the live integration tests spawn.
+The deployed console entry point (``chutes-litellm-proxy``) also serves
+in-process, so in-memory registrations survive there too.  This launcher remains
+for live integration tests: it serves an already-expanded config directly, keeps
+the custom ``chutes_e2ee`` provider and the optional host-scoped E2EE transport
+installed in the same process that serves HTTP, and can pick a free port.  It is
+what the live integration tests spawn.
 
 Environment:
 
