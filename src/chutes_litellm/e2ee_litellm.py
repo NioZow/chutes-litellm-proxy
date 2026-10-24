@@ -14,14 +14,16 @@ every other host.  The result:
 
   * native ``chutes`` provider semantics (param validation, transforms,
     streaming, usage, retries — all maintained upstream);
-  * end-to-end encryption only where it belongs (``llm.chutes.ai`` /
-    ``api.chutes.ai``);
+  * end-to-end encryption only where it belongs (the fixed
+    ``https://llm.chutes.ai`` / ``https://api.chutes.ai`` hosts);
   * works through the Router / proxy YAML config: no client objects need to be
     embedded in ``model_list``.
 
-Optional: with ``CHUTES_VERIFY_ATTESTATION=true`` every request additionally
-runs the :mod:`chutes_litellm.attestation` gate, which refuses to encrypt to an
-instance whose TDX/GPU attestation evidence does not verify (fail closed).
+Every request to a Chutes host is end-to-end encrypted and runs the
+:mod:`chutes_litellm.attestation` gate, which refuses to encrypt to an instance
+whose TDX/GPU attestation evidence does not verify (fail closed).  Attestation,
+NVIDIA GPU verification and TLS verification are always on and cannot be
+disabled.
 """
 
 from __future__ import annotations
@@ -30,8 +32,11 @@ import json
 import os
 import threading
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
+
+from . import endpoints
 
 try:
     import chutes_e2ee as _chutes_e2ee
@@ -47,22 +52,30 @@ def _transport_classes() -> tuple[type, type]:
         raise RuntimeError(f"chutes_e2ee is not importable: {_IMPORT_ERROR}")
     return _chutes_e2ee.ChutesE2EETransport, _chutes_e2ee.AsyncChutesE2EETransport
 
+
 DEFAULT_LLM_HOST = "llm.chutes.ai"
 DEFAULT_API_HOST = "api.chutes.ai"
-DEFAULT_E2EE_API_BASE = f"https://{DEFAULT_API_HOST}"
-DEFAULT_MODELS_BASE = f"https://{DEFAULT_LLM_HOST}"
 
 
-def _env_bool(name: str, default: bool = True) -> bool:
-    val = os.environ.get(name)
-    if val is None:
-        return default
-    return val.strip().lower() in {"1", "true", "yes", "on"}
+def _host_of(base: str) -> str:
+    """Return the lowercase hostname of *base*, or an empty string."""
+    return (urlsplit(base).hostname or "").strip().lower()
 
 
 def _e2ee_hosts() -> set[str]:
-    raw = os.environ.get("CHUTES_E2EE_HOSTS", f"{DEFAULT_LLM_HOST},{DEFAULT_API_HOST}")
-    return {h.strip().lower() for h in raw.split(",") if h.strip()}
+    """Hosts whose traffic is end-to-end encrypted and attested.
+
+    The hosts are derived at call time from the fixed ``endpoints.API_BASE`` /
+    ``endpoints.MODELS_BASE``, and the canonical Chutes hosts are always
+    included.  There is no environment override: a Chutes host can never be
+    opted out of the E2EE/attestation path.
+    """
+    hosts = {DEFAULT_LLM_HOST, DEFAULT_API_HOST}
+    for base in (endpoints.API_BASE, endpoints.MODELS_BASE):
+        host = _host_of(base)
+        if host:
+            hosts.add(host)
+    return hosts
 
 
 def _json_model(body: bytes) -> str | None:
@@ -108,7 +121,6 @@ class _ChutesScopedTransport(httpx.BaseTransport):
         api_key: str,
         *,
         hosts: set[str],
-        verify: bool = True,
         api_key_provider: Any = None,
     ) -> None:
         if _IMPORT_ERROR is not None:  # pragma: no cover
@@ -116,55 +128,41 @@ class _ChutesScopedTransport(httpx.BaseTransport):
         _SyncCls, _ = _transport_classes()
         self._api_key = api_key
         self._hosts = hosts
-        self._verify = verify
-        self._e2e_api_base = os.environ.get("CHUTES_E2EE_API_BASE") or DEFAULT_E2EE_API_BASE
-        self._models_base = os.environ.get("CHUTES_E2EE_MODELS_BASE") or DEFAULT_MODELS_BASE
-        self._verify_attestation = _env_bool("CHUTES_VERIFY_ATTESTATION")
-        self._verify_quote = _env_bool("CHUTES_VERIFY_QUOTE")
-        self._verify_gpu = _env_bool("CHUTES_VERIFY_GPU")
+        self._e2e_api_base = endpoints.API_BASE
+        self._models_base = endpoints.MODELS_BASE
         self._api_key_provider = api_key_provider
-        self._inner = httpx.HTTPTransport(verify=verify)
-        transport_kwargs: dict[str, Any] = {
-            "api_key": api_key,
-            "api_base": self._e2e_api_base,
-            "models_base": self._models_base,
-            "inner": self._inner,
-        }
-        if self._verify_attestation:
-            # `instance_filter` is a fork-only kwarg: only pass it when the gate
-            # is on, so a stock `chutes-e2ee` still works with attestation off.
-            # With the gate on, it restricts the transport's own instance pool to
+        self._inner = httpx.HTTPTransport(verify=True)
+        self._transport = _SyncCls(
+            api_key=api_key,
+            api_base=self._e2e_api_base,
+            models_base=self._models_base,
+            inner=self._inner,
+            # `instance_filter` restricts the transport's own instance pool to
             # the instances the gate verified, so selection and verification
             # cannot diverge.
-            transport_kwargs["instance_filter"] = self._instance_filter
-        self._transport = _SyncCls(**transport_kwargs)
+            instance_filter=self._instance_filter,
+        )
 
     def _instance_filter(self, chute_id: str, instances: list[Any]) -> list[Any]:
         """Attestation-backed instance filter for the E2EE transport.
 
         Called by ``DiscoveryManager`` with the same ``chute_id`` the transport
         resolved, and cached by the attestation gate, so after the pre-send
-        ``_maybe_verify`` this is a cache hit.  Raises a typed LiteLLM error to
+        ``_verify_request`` this is a cache hit.  Raises a typed LiteLLM error to
         refuse the chute when verification fails.
         """
         from .attestation import AttestationError, verify_chute
 
         api_key = (self._api_key_provider() if self._api_key_provider else None) or self._api_key
         try:
-            verified = verify_chute(
-                api_key,
-                chute_id,
-                verify_quote=self._verify_quote,
-                verify_gpu=self._verify_gpu,
-            )
+            verified = verify_chute(api_key, chute_id)
         except AttestationError as exc:
             raise _attestation_failure(chute_id, exc) from exc
-        allowed = set(verified)
-        return [inst for inst in instances if inst.instance_id in allowed]
+        # Pin the key the gate verified: a racing/malicious discovery response
+        # must not be able to substitute a different key for the same id.
+        return [inst for inst in instances if verified.get(inst.instance_id) == getattr(inst, "e2e_pubkey", None)]
 
-    def _maybe_verify(self, request: httpx.Request) -> None:
-        if not self._verify_attestation:
-            return
+    def _verify_request(self, request: httpx.Request) -> None:
         from .attestation import AttestationError, verify_model
 
         model = _json_model(request.content)
@@ -173,21 +171,16 @@ class _ChutesScopedTransport(httpx.BaseTransport):
         from chutes_litellm import get_logger
 
         logger = get_logger("chutes_litellm.e2ee")
-        logger.info("_maybe_verify: model=%s quote=%s gpu=%s", model, self._verify_quote, self._verify_gpu)
+        logger.info("_verify_request: model=%s", model)
         try:
-            verify_model(
-                self._api_key_provider(),
-                model,
-                verify_quote=self._verify_quote,
-                verify_gpu=self._verify_gpu,
-            )
+            verify_model(self._api_key_provider(), model)
         except AttestationError as exc:
-            logger.warning("_maybe_verify: model=%s FAILED %s", model, exc)
+            logger.warning("_verify_request: model=%s FAILED %s", model, exc)
             raise _attestation_failure(model, exc) from exc
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.host.lower() in self._hosts:
-            self._maybe_verify(request)
+            self._verify_request(request)
             return self._transport.handle_request(request)
         return self._inner.handle_request(request)
 
@@ -204,7 +197,6 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
         api_key: str,
         *,
         hosts: set[str],
-        verify: bool = True,
         api_key_provider: Any = None,
     ) -> None:
         if _IMPORT_ERROR is not None:  # pragma: no cover
@@ -212,49 +204,37 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
         _, _AsyncCls = _transport_classes()
         self._api_key = api_key
         self._hosts = hosts
-        self._verify = verify
-        self._e2e_api_base = os.environ.get("CHUTES_E2EE_API_BASE") or DEFAULT_E2EE_API_BASE
-        self._models_base = os.environ.get("CHUTES_E2EE_MODELS_BASE") or DEFAULT_MODELS_BASE
-        self._verify_attestation = _env_bool("CHUTES_VERIFY_ATTESTATION")
-        self._verify_quote = _env_bool("CHUTES_VERIFY_QUOTE")
-        self._verify_gpu = _env_bool("CHUTES_VERIFY_GPU")
+        self._e2e_api_base = endpoints.API_BASE
+        self._models_base = endpoints.MODELS_BASE
         self._api_key_provider = api_key_provider
-        self._inner = httpx.AsyncHTTPTransport(verify=verify)
-        transport_kwargs: dict[str, Any] = {
-            "api_key": api_key,
-            "api_base": self._e2e_api_base,
-            "models_base": self._models_base,
-            "inner": self._inner,
-        }
-        if self._verify_attestation:
+        self._inner = httpx.AsyncHTTPTransport(verify=True)
+        self._transport = _AsyncCls(
+            api_key=api_key,
+            api_base=self._e2e_api_base,
+            models_base=self._models_base,
+            inner=self._inner,
             # Fork-only kwarg; see the sync transport above.
-            transport_kwargs["instance_filter"] = self._instance_filter
-        self._transport = _AsyncCls(**transport_kwargs)
+            instance_filter=self._instance_filter,
+        )
 
     def _instance_filter(self, chute_id: str, instances: list[Any]) -> list[Any]:
         """Attestation-backed instance filter (see the sync transport).
 
-        ``_maybe_verify`` runs first on the event loop's executor and warms the
+        ``_verify_request`` runs first on the event loop's executor and warms the
         gate's cache, so this call is a cache hit and does not block on network.
         """
         from .attestation import AttestationError, verify_chute
 
         api_key = (self._api_key_provider() if self._api_key_provider else None) or self._api_key
         try:
-            verified = verify_chute(
-                api_key,
-                chute_id,
-                verify_quote=self._verify_quote,
-                verify_gpu=self._verify_gpu,
-            )
+            verified = verify_chute(api_key, chute_id)
         except AttestationError as exc:
             raise _attestation_failure(chute_id, exc) from exc
-        allowed = set(verified)
-        return [inst for inst in instances if inst.instance_id in allowed]
+        # Pin the key the gate verified: a racing/malicious discovery response
+        # must not be able to substitute a different key for the same id.
+        return [inst for inst in instances if verified.get(inst.instance_id) == getattr(inst, "e2e_pubkey", None)]
 
-    async def _maybe_verify(self, request: httpx.Request) -> None:
-        if not self._verify_attestation:
-            return
+    async def _verify_request(self, request: httpx.Request) -> None:
         import asyncio
 
         from .attestation import AttestationError, verify_model
@@ -265,22 +245,16 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
         from chutes_litellm import get_logger
 
         logger = get_logger("chutes_litellm.e2ee")
-        logger.info("_maybe_verify(async): model=%s quote=%s gpu=%s", model, self._verify_quote, self._verify_gpu)
+        logger.info("_verify_request(async): model=%s", model)
         try:
-            await asyncio.to_thread(
-                verify_model,
-                self._api_key_provider(),
-                model,
-                verify_quote=self._verify_quote,
-                verify_gpu=self._verify_gpu,
-            )
+            await asyncio.to_thread(verify_model, self._api_key_provider(), model)
         except AttestationError as exc:
-            logger.warning("_maybe_verify(async): model=%s FAILED %s", model, exc)
+            logger.warning("_verify_request(async): model=%s FAILED %s", model, exc)
             raise _attestation_failure(model, exc) from exc
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.host.lower() in self._hosts:
-            await self._maybe_verify(request)
+            await self._verify_request(request)
             return await self._transport.handle_async_request(request)
         return await self._inner.handle_async_request(request)
 
@@ -304,10 +278,6 @@ def _api_key() -> str | None:
     return os.environ.get("CHUTES_API_KEY")
 
 
-def _verify_setting() -> bool:
-    return bool(os.environ.get("CHUTES_E2EE_VERIFY_SSL", "true").strip().lower() in {"1", "true", "yes", "on"})
-
-
 def _scoped_client() -> httpx.Client | None:
     key = _api_key()
     if not key:
@@ -319,7 +289,6 @@ def _scoped_client() -> httpx.Client | None:
                 transport=_ChutesScopedTransport(
                     key,
                     hosts=_e2ee_hosts(),
-                    verify=_verify_setting(),
                     api_key_provider=_api_key,
                 ),
                 timeout=httpx.Timeout(600.0, connect=10.0),
@@ -339,7 +308,6 @@ def _scoped_aclient() -> httpx.AsyncClient | None:
                 transport=_ChutesScopedAsyncTransport(
                     key,
                     hosts=_e2ee_hosts(),
-                    verify=_verify_setting(),
                     api_key_provider=_api_key,
                 ),
                 timeout=httpx.Timeout(600.0, connect=10.0),

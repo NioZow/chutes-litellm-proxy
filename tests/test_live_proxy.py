@@ -40,13 +40,19 @@ pytestmark = pytest.mark.skipif(
     reason="set CHUTES_LIVE_TEE=1 and CHUTES_API_KEY to run live checks",
 )
 
+
+@pytest.fixture(autouse=True)
+def _fake_tee_boundaries():
+    """Run live tests against the real DCAP verifier, measurements and NRAS.
+
+    ``tests/conftest.py`` fakes those offline boundaries for the unit suite; a
+    live run must not inherit those fakes.
+    """
+    yield
+
+
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts" / "live_server.py"
-
-PROD_API_BASE = "https://api.chutes.ai"
-PROD_MODELS_BASE = "https://llm.chutes.ai"
-
-_ENV_KEYS = ("CHUTES_API_KEY", "CHUTES_E2EE_API_BASE", "CHUTES_E2EE_MODELS_BASE", "CHUTES_E2EE_HOSTS", "CHUTES_E2EE_VERIFY_SSL")
 
 _PREFERRED = ("flash-0731", "0731", "v4", "deepseek")
 
@@ -82,7 +88,7 @@ def _resolve_live_model(api_key: str) -> str:
     override = os.environ.get("CHUTES_LIVE_MODEL", "").strip()
     if override:
         return override
-    model_map = attestation.fetch_model_map(api_key, models_base=PROD_MODELS_BASE)
+    model_map = attestation.fetch_model_map(api_key)
     tee = [m for m in model_map if m.endswith("-TEE")]
     if not tee:
         raise pytest.skip(f"no -TEE models available under this key ({sorted(model_map)[:5]!r})")
@@ -95,24 +101,13 @@ def _resolve_live_model(api_key: str) -> str:
 
 @pytest.fixture(scope="module")
 def live_env() -> None:
-    """Production-faithful transport defaults for the duration of this module.
+    """Live runs use the fixed production endpoints automatically.
 
-    The offline suite (conftest) injects mock pointers; live runs must keep the
-    real bases and enforce real TLS verification.
+    There is nothing to point at the real bases: ``endpoints.API_BASE`` /
+    ``endpoints.MODELS_BASE`` are fixed, and the offline suite's monkeypatches
+    are function-scoped and never leak into this module.
     """
-    snapshot = {key: os.environ.get(key) for key in _ENV_KEYS}
-    try:
-        os.environ["CHUTES_E2EE_API_BASE"] = PROD_API_BASE
-        os.environ["CHUTES_E2EE_MODELS_BASE"] = PROD_MODELS_BASE
-        os.environ.pop("CHUTES_E2EE_HOSTS", None)
-        os.environ["CHUTES_E2EE_VERIFY_SSL"] = "true"
-        yield
-    finally:
-        for key, value in snapshot.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+    yield
 
 
 @pytest.fixture(scope="module")
@@ -219,7 +214,7 @@ def test_live_thinking_visibility(live_env, registered_provider, api_key):
     """
     import asyncio
 
-    available = set(attestation.fetch_model_map(api_key, models_base=PROD_MODELS_BASE))
+    available = set(attestation.fetch_model_map(api_key))
     ran = 0
     for model_id, params in _REASONING_CASES:
         if model_id not in available:
@@ -319,7 +314,6 @@ def test_live_gated_request_uses_verified_instance(live_env, registered_provider
     model = os.environ.get("CHUTES_LIVE_MODEL", "").strip() or _resolve_live_model(api_key)
     attestation._verify_cache.clear()
     cp.reset_clients()
-    os.environ["CHUTES_VERIFY_ATTESTATION"] = "true"
     try:
         verified = set(attestation.verify_chute(api_key, model, force=True))
         assert verified, "live chute produced no verified instances"
@@ -337,7 +331,6 @@ def test_live_gated_request_uses_verified_instance(live_env, registered_provider
             f"invoked instance {seen.get('instance_id')!r} is not in verified set {sorted(verified)!r}"
         )
     finally:
-        os.environ.pop("CHUTES_VERIFY_ATTESTATION", None)
         cp.reset_clients()
 
 

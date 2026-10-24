@@ -32,11 +32,15 @@ where the server honours ``reasoning_effort`` directly (DeepSeek).
 The wire model id is the raw Chutes model id (the ``chutes_e2ee/`` prefix, if
 present, is stripped) so the transport can resolve the model to its chute.
 
-Environment overrides (shared with :mod:`chutes_litellm.e2ee_litellm`):
+Environment (shared with :mod:`chutes_litellm.e2ee_litellm`):
 
-* ``CHUTES_E2EE_API_BASE``    - E2EE API base (default ``https://api.chutes.ai``)
-* ``CHUTES_E2EE_MODELS_BASE`` - OpenAI-compatible model base (default ``https://llm.chutes.ai``)
-* ``CHUTES_E2EE_VERIFY_SSL``  - TLS verification for the underlying transport (default ``true``)
+* ``CHUTES_API_KEY`` - Chutes API key (required).
+* ``CHUTES_LOG_LEVEL`` / ``CHUTES_LOG_FILE`` - logging configuration, see
+  :func:`chutes_litellm.get_logger`.
+
+The Chutes endpoints are fixed (``https://api.chutes.ai`` and
+``https://llm.chutes.ai``) and cannot be overridden.  Attestation, NVIDIA GPU
+verification and TLS verification are always on.
 """
 
 from __future__ import annotations
@@ -49,15 +53,14 @@ import time
 from typing import Any, AsyncIterator, Iterator
 
 import httpx
+import litellm
 from litellm.llms.custom_llm import CustomLLM
 from litellm.types.utils import Choices, Message, ModelResponse, ModelResponseStream, Usage
 
-import litellm
+from . import endpoints
 
 PROVIDER = "chutes_e2ee"
 
-DEFAULT_E2EE_API_BASE = "https://api.chutes.ai"
-DEFAULT_MODELS_BASE = "https://llm.chutes.ai"
 CHAT_PATH = "/v1/chat/completions"
 
 # OpenAI chat.completions parameters forwarded as-is.  Everything else in
@@ -133,10 +136,9 @@ _STRIP_MESSAGE_KEYS = frozenset(
 )
 
 _lock = threading.Lock()
-# Cache key: (api_key, api_base, models_base, verify_ssl, attest, quote, gpu) so a
-# transport built with a different attestation mode is never reused.
-_sync_transports: dict[tuple[str, str, str, bool, bool, bool, bool], httpx.BaseTransport] = {}
-_async_transports: dict[tuple[str, str, str, bool, bool, bool, bool], httpx.AsyncBaseTransport] = {}
+# Cache key: api_key (the endpoints are fixed).
+_sync_transports: dict[str, httpx.BaseTransport] = {}
+_async_transports: dict[str, httpx.AsyncBaseTransport] = {}
 
 
 def reset_clients() -> None:
@@ -152,27 +154,16 @@ def reset_clients() -> None:
         _async_transports.clear()
 
 
-def _verify_setting() -> bool:
-    return os.environ.get("CHUTES_E2EE_VERIFY_SSL", "true").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def _bases() -> tuple[str, str]:
-    return (
-        os.environ.get("CHUTES_E2EE_API_BASE") or DEFAULT_E2EE_API_BASE,
-        os.environ.get("CHUTES_E2EE_MODELS_BASE") or DEFAULT_MODELS_BASE,
-    )
+    """Return the fixed ``(api_base, models_base)`` endpoints at call time."""
+    return endpoints.API_BASE, endpoints.MODELS_BASE
 
 
 def _api_key_of(api_key: str | None) -> str | None:
     return api_key or os.environ.get("CHUTES_API_KEY")
 
 
-def _attestation_instance_filter(api_key: str, verify_quote: bool, verify_gpu: bool):
+def _attestation_instance_filter(api_key: str):
     """Build an E2EE-transport instance filter backed by the attestation gate.
 
     The transport calls it with the resolved ``chute_id``; only instances the
@@ -183,77 +174,58 @@ def _attestation_instance_filter(api_key: str, verify_quote: bool, verify_gpu: b
 
     def _filter(chute_id: str, instances: list) -> list:
         from chutes_litellm import get_logger
+
         from .attestation import AttestationError, verify_chute
         from .e2ee_litellm import _attestation_failure
 
         logger = get_logger("chutes_litellm.custom_provider")
         try:
-            logger.info("instance_filter: chute_id=%s quote=%s gpu=%s", chute_id, verify_quote, verify_gpu)
-            verified = verify_chute(
-                api_key,
-                chute_id,
-                verify_quote=verify_quote,
-                verify_gpu=verify_gpu,
-            )
+            logger.info("instance_filter: chute_id=%s", chute_id)
+            verified = verify_chute(api_key, chute_id)
         except AttestationError as exc:
             logger.warning("instance_filter: chute_id=%s FAILED %s", chute_id, exc)
             raise _attestation_failure(chute_id, exc) from exc
-        allowed = set(verified)
-        logger.info("instance_filter: chute_id=%s allowed=%s/%s", chute_id, len(allowed), len(instances))
-        return [inst for inst in instances if inst.instance_id in allowed]
+        # Pin the key the gate verified: reject a substituted key for the same id.
+        kept = [inst for inst in instances if verified.get(inst.instance_id) == getattr(inst, "e2e_pubkey", None)]
+        logger.info("instance_filter: chute_id=%s allowed=%s/%s", chute_id, len(kept), len(instances))
+        return kept
 
     return _filter
 
 
-def _attestation_mode() -> tuple[bool, bool, bool]:
-    return (
-        _env_bool("CHUTES_VERIFY_ATTESTATION"),
-        _env_bool("CHUTES_VERIFY_QUOTE"),
-        _env_bool("CHUTES_VERIFY_GPU"),
-    )
-
-
-def _sync_transport(api_key: str, api_base: str, models_base: str) -> httpx.BaseTransport:
-    attest, quote, gpu = _attestation_mode()
-    key = (api_key, api_base, models_base, _verify_setting(), attest, quote, gpu)
+def _sync_transport(api_key: str) -> httpx.BaseTransport:
+    """Return the cached sync transport for *api_key* (fixed endpoints)."""
     with _lock:
-        transport = _sync_transports.get(key)
+        transport = _sync_transports.get(api_key)
         if transport is None:
             from chutes_e2ee import ChutesE2EETransport
 
-            kwargs: dict = {
-                "api_key": api_key,
-                "api_base": api_base,
-                "models_base": models_base,
-                "inner": httpx.HTTPTransport(verify=_verify_setting()),
-            }
-            if attest:
-                # Fork-only kwarg; only pass it when the gate is on so a stock
-                # chutes-e2ee keeps working with attestation off.
-                kwargs["instance_filter"] = _attestation_instance_filter(api_key, quote, gpu)
-            transport = ChutesE2EETransport(**kwargs)
-            _sync_transports[key] = transport
+            transport = ChutesE2EETransport(
+                api_key=api_key,
+                api_base=endpoints.API_BASE,
+                models_base=endpoints.MODELS_BASE,
+                inner=httpx.HTTPTransport(verify=True),
+                instance_filter=_attestation_instance_filter(api_key),
+            )
+            _sync_transports[api_key] = transport
         return transport
 
 
-def _async_transport(api_key: str, api_base: str, models_base: str) -> httpx.AsyncBaseTransport:
-    attest, quote, gpu = _attestation_mode()
-    key = (api_key, api_base, models_base, _verify_setting(), attest, quote, gpu)
+def _async_transport(api_key: str) -> httpx.AsyncBaseTransport:
+    """Return the cached async transport for *api_key* (fixed endpoints)."""
     with _lock:
-        transport = _async_transports.get(key)
+        transport = _async_transports.get(api_key)
         if transport is None:
             from chutes_e2ee import AsyncChutesE2EETransport
 
-            kwargs: dict = {
-                "api_key": api_key,
-                "api_base": api_base,
-                "models_base": models_base,
-                "inner": httpx.AsyncHTTPTransport(verify=_verify_setting()),
-            }
-            if attest:
-                kwargs["instance_filter"] = _attestation_instance_filter(api_key, quote, gpu)
-            transport = AsyncChutesE2EETransport(**kwargs)
-            _async_transports[key] = transport
+            transport = AsyncChutesE2EETransport(
+                api_key=api_key,
+                api_base=endpoints.API_BASE,
+                models_base=endpoints.MODELS_BASE,
+                inner=httpx.AsyncHTTPTransport(verify=True),
+                instance_filter=_attestation_instance_filter(api_key),
+            )
+            _async_transports[api_key] = transport
         return transport
 
 
@@ -268,38 +240,24 @@ def _clean_model(model: str) -> str:
     return model
 
 
-def _env_bool(name: str, default: bool = True) -> bool:
-    val = os.environ.get(name)
-    if val is None:
-        return default
-    return val.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _maybe_verify_attestation(api_key: str, model: str) -> None:
+def _verify_attestation(api_key: str, model: str) -> None:
     """Fail-closed TEE/GPU attestation gate (mirrors :mod:`e2ee_litellm`).
 
-    No-op unless ``CHUTES_VERIFY_ATTESTATION`` is set.  Raises a LiteLLM
-    ``APIError`` carrying the per-instance reasons when verification fails,
-    before any request is built or encrypted.
+    Always runs.  Raises a LiteLLM ``APIError`` carrying the per-instance reasons
+    when verification fails, before any request is built or encrypted.
     """
-    if not _env_bool("CHUTES_VERIFY_ATTESTATION"):
-        return
     from chutes_litellm import get_logger
+
     from .attestation import AttestationError, verify_model
     from .e2ee_litellm import _attestation_failure
 
     logger = get_logger("chutes_litellm.custom_provider")
     wire_model = _clean_model(model)
-    logger.info("_maybe_verify_attestation: model=%s quote=%s gpu=%s", wire_model, _env_bool("CHUTES_VERIFY_QUOTE"), _env_bool("CHUTES_VERIFY_GPU"))
+    logger.info("_verify_attestation: model=%s", wire_model)
     try:
-        verify_model(
-            api_key,
-            wire_model,
-            verify_quote=_env_bool("CHUTES_VERIFY_QUOTE"),
-            verify_gpu=_env_bool("CHUTES_VERIFY_GPU"),
-        )
+        verify_model(api_key, wire_model)
     except AttestationError as exc:
-        logger.warning("_maybe_verify_attestation: model=%s FAILED %s", wire_model, exc)
+        logger.warning("_verify_attestation: model=%s FAILED %s", wire_model, exc)
         raise _attestation_failure(wire_model, exc) from exc
 
 
@@ -573,7 +531,7 @@ class ChutesCustomProvider(CustomLLM):
                 model=model,
                 llm_provider=PROVIDER,
             )
-        _maybe_verify_attestation(api_key, model)
+        _verify_attestation(api_key, model)
         _, models_base = _bases()
         payload = _build_payload(model, messages, optional_params or {}, stream=False)
         request = httpx.Request(
@@ -582,8 +540,7 @@ class ChutesCustomProvider(CustomLLM):
             json=payload,
             extensions={"timeout": timeout or httpx.Timeout(600.0, connect=10.0)},
         )
-        e2ee_base, _ = _bases()
-        response = _sync_transport(api_key, e2ee_base, models_base).handle_request(request)
+        response = _sync_transport(api_key).handle_request(request)
         try:
             _raise_for_error(response, model, api_key)
             data = response.json()
@@ -626,8 +583,8 @@ class ChutesCustomProvider(CustomLLM):
                 model=model,
                 llm_provider=PROVIDER,
             )
-        await asyncio.to_thread(_maybe_verify_attestation, api_key, model)
-        api_base, models_base = _bases()
+        await asyncio.to_thread(_verify_attestation, api_key, model)
+        _, models_base = _bases()
         payload = _build_payload(model, messages, optional_params or {}, stream=False)
         request = httpx.Request(
             "POST",
@@ -635,7 +592,7 @@ class ChutesCustomProvider(CustomLLM):
             json=payload,
             extensions={"timeout": timeout or httpx.Timeout(600.0, connect=10.0)},
         )
-        transport = _async_transport(api_key, api_base, models_base)
+        transport = _async_transport(api_key)
         response = await transport.handle_async_request(request)
         try:
             _raise_for_error(response, model, api_key)
@@ -679,8 +636,8 @@ class ChutesCustomProvider(CustomLLM):
                 model=model,
                 llm_provider=PROVIDER,
             )
-        _maybe_verify_attestation(api_key, model)
-        api_base, models_base = _bases()
+        _verify_attestation(api_key, model)
+        _, models_base = _bases()
         payload = _build_payload(model, messages, optional_params or {}, stream=True)
         request = httpx.Request(
             "POST",
@@ -688,7 +645,7 @@ class ChutesCustomProvider(CustomLLM):
             json=payload,
             extensions={"timeout": timeout or httpx.Timeout(600.0, connect=10.0)},
         )
-        response = _sync_transport(api_key, api_base, models_base).handle_request(request)
+        response = _sync_transport(api_key).handle_request(request)
         try:
             _raise_for_error(response, model, api_key)
             yield from _yield_stream_chunks(_iter_events_sync(response))
@@ -723,8 +680,8 @@ class ChutesCustomProvider(CustomLLM):
                 model=model,
                 llm_provider=PROVIDER,
             )
-        await asyncio.to_thread(_maybe_verify_attestation, api_key, model)
-        api_base, models_base = _bases()
+        await asyncio.to_thread(_verify_attestation, api_key, model)
+        _, models_base = _bases()
         payload = _build_payload(model, messages, optional_params or {}, stream=True)
         request = httpx.Request(
             "POST",
@@ -732,7 +689,7 @@ class ChutesCustomProvider(CustomLLM):
             json=payload,
             extensions={"timeout": timeout or httpx.Timeout(600.0, connect=10.0)},
         )
-        transport = _async_transport(api_key, api_base, models_base)
+        transport = _async_transport(api_key)
         response = await transport.handle_async_request(request)
         try:
             _raise_for_error(response, model, api_key)
@@ -757,9 +714,8 @@ def _install_supported_params() -> None:
     hook in this LiteLLM version, so we wrap the resolver and append our params
     only when the provider is ours.  Idempotent.
     """
-    from litellm.litellm_core_utils import get_supported_openai_params as core
-
     import litellm.utils as litellm_utils
+    from litellm.litellm_core_utils import get_supported_openai_params as core
 
     original = core.get_supported_openai_params
     if getattr(original, "__chutes_supported_params__", False):

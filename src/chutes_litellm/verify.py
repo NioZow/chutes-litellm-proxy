@@ -5,14 +5,17 @@ and chutes_litellm.attestation.verify_evidence():
 
   * GET /e2e/instances/{chute_id}          -> instance ML-KEM pubkeys
   * GET /chutes/{chute_id}/evidence?nonce= -> TDX quote + per-GPU NVIDIA evidence
-  * key-possession signature + SHA256(nonce + e2e_pubkey) binding checks
+  * signed-body RSA signature, exact report_data binding to sha256(nonce + e2e_pubkey) and the certificate public key, and a published-measurement match
 
-Full Intel DCAP quote / NVIDIA attestation verification requires the optional
-``dcap-qvl`` and ``nv-attestation-sdk`` packages (add --verify-quote/--verify-gpu).
+Intel DCAP quote verification, published-measurement matching, and NVIDIA NRAS
+GPU verification are all mandatory.
+
+The Chutes endpoints are fixed (``https://api.chutes.ai`` and
+``https://llm.chutes.ai``) and cannot be overridden.
 
 Examples:
   CHUTES_API_KEY=cpk_... chutes-verify-attestation --model "Qwen/Qwen3.5-397B-A17B-TEE"
-  CHUTES_API_KEY=cpk_... chutes-verify-attestation --chute 51a4284a-a5a0-5e44-a9cc-6af5a2abfbcf --verify-quote --verify-gpu
+  CHUTES_API_KEY=cpk_... chutes-verify-attestation --chute 51a4284a-a5a0-5e44-a9cc-6af5a2abfbcf --details
 """
 
 from __future__ import annotations
@@ -25,16 +28,10 @@ from chutes_litellm import attestation as att
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="chutes-verify-attestation", description=__doc__
-    )
+    parser = argparse.ArgumentParser(prog="chutes-verify-attestation", description=__doc__)
     parser.add_argument("--model", help="Chutes model id (as listed at llm.chutes.ai/v1/models)")
     parser.add_argument("--chute", help="Chute id (uuid); takes precedence over --model")
     parser.add_argument("--api-key", default=os.environ.get("CHUTES_API_KEY"), help="Chutes API key")
-    parser.add_argument("--api-base", default=att.DEFAULT_API_BASE)
-    parser.add_argument("--models-base", default=att.DEFAULT_MODELS_BASE)
-    parser.add_argument("--verify-quote", action="store_true", help="verify TDX quote with Intel DCAP (dcap-qvl)")
-    parser.add_argument("--verify-gpu", action="store_true", help="verify NVIDIA evidence (nv-attestation-sdk)")
     parser.add_argument("--force", action="store_true", help="ignore the verification cache")
     parser.add_argument(
         "--details",
@@ -79,14 +76,7 @@ def main() -> int:
 
     if args.details:
         try:
-            report = att.verify_chute_report(
-                args.api_key,
-                lookup,
-                api_base=args.api_base,
-                models_base=args.models_base,
-                verify_quote=args.verify_quote,
-                verify_gpu=args.verify_gpu,
-            )
+            report = att.verify_chute_report(args.api_key, lookup)
         except att.AttestationError as exc:
             print(f"FAILED: {exc}", file=sys.stderr)
             return 1
@@ -101,10 +91,6 @@ def main() -> int:
         verified = att.verify_chute(
             args.api_key,
             lookup,
-            api_base=args.api_base,
-            models_base=args.models_base,
-            verify_quote=args.verify_quote,
-            verify_gpu=args.verify_gpu,
             force=args.force,
         )
     except att.AttestationError as exc:

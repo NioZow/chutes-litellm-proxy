@@ -19,13 +19,14 @@ RUN apt-get update \
 WORKDIR /app
 
 # 1. Install dependencies only, so this layer is cached until the lock changes.
-#    `--extra attestation` pulls the optional hardware-root SDKs (dcap-qvl,
-#    nv-attestation-sdk). They are inert unless CHUTES_VERIFY_QUOTE /
-#    CHUTES_VERIFY_GPU are set, but baking them in means the image can do real
-#    Intel DCAP / NVIDIA verification out of the box.
+#    dcap-qvl (Intel DCAP) and nv-attestation-sdk (NVIDIA NRAS) are ALWAYS base
+#    dependencies of this image: hardware-root attestation, DCAP quote
+#    verification, GPU/NRAS verification, measurement matching and TLS
+#    verification are always enforced. There is no extra or flag that disables
+#    them.
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project --no-dev --extra attestation
+    uv sync --locked --no-install-project --no-dev
 
 # 2. Install the proxy itself (non-editable: the wheel + config template are
 #    baked into .venv, so the runtime only needs this image, not the sources).
@@ -33,7 +34,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY README.md ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable --extra attestation
+    uv sync --locked --no-dev --no-editable
 
 ENV PATH="/app/.venv/bin:$PATH"
 

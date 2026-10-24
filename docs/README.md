@@ -22,9 +22,10 @@ verified TDX + NVIDIA verdict without reading the source first.
 2. **Attestation.** Encryption alone proves nothing about *whose* key you
    encrypted to. Before trusting an instance key, the proxy fetches hardware
    evidence and checks that the key is bound into a **TDX quote** and into
-   **NVIDIA GPU** evidence, optionally verifying those roots with Intel DCAP and
-   NVIDIA NRAS. If anything does not line up, the request is refused (fail
-   closed).
+   **NVIDIA GPU** evidence, verifying those roots with Intel DCAP and NVIDIA
+   NRAS (both mandatory). If anything does not line up, the request is refused
+   (fail closed). Model weights are not covered by the current protocol; see
+   [attestation.md §14](./attestation.md#14-model-weights-are-not-attested).
 
 ## Code map
 
@@ -43,4 +44,4 @@ verified TDX + NVIDIA verdict without reading the source first.
 > [`niozow/chutes-e2ee-transport`](https://github.com/niozow/chutes-e2ee-transport),
 > cloned locally at `./chutes-e2ee-transport` (gitignored). The proxy pins a
 > specific commit; the fork adds the authenticated-instance hook described in
-> [attestation.md §8](./attestation.md#8-binding-attested-instances-to-selection).
+> [attestation.md §9](./attestation.md#9-binding-attested-instances-to-selection).

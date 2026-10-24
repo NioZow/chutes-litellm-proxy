@@ -81,12 +81,13 @@
       };
 
     # -----------------------------------------------------------------------
-    # Optional hardware-attestation SDKs (Intel DCAP + NVIDIA).  None are in
-    # nixpkgs, so vendor them from PyPI like pqcrypto.  dcap-qvl is a Rust
-    # extension but ships an `abi3` wheel (cp38+, so Python-version agnostic);
+    # Hardware-attestation SDKs (Intel DCAP + NVIDIA).  None are in nixpkgs, so
+    # vendor them from PyPI like pqcrypto.  dcap-qvl is a Rust extension but
+    # ships an `abi3` wheel (cp38+, so Python-version agnostic);
     # nv-attestation-sdk / nv-local-gpu-verifier are pure-Python wheels.
-    # Everything here is only referenced when `withAttestation = true`, so the
-    # base environment still builds with neither SDK present.
+    # They are always part of the package/environment: attestation, Intel DCAP
+    # quote verification, NVIDIA NRAS GPU verification and measurement matching
+    # are mandatory and cannot be disabled by any build option.
     # -----------------------------------------------------------------------
     wheelPlatform = pkgs:
       if pkgs.stdenv.hostPlatform.isLinux && pkgs.stdenv.hostPlatform.isx86_64
@@ -131,7 +132,7 @@
     # -----------------------------------------------------------------------
     # Python environment shared by the dev shell and the packaged proxy.
     # -----------------------------------------------------------------------
-    mkChutesPython = pkgs: {withAttestation ? false}: let
+    mkChutesPython = pkgs: let
       python = pkgs.python3;
 
       pqcrypto = python.pkgs.buildPythonPackage {
@@ -166,7 +167,7 @@
         ];
       };
 
-      # --- optional hardware-root attestation (only with withAttestation) ---
+      # --- hardware-root attestation (always included) ---
       # Intel DCAP quote verification (Rust abi3 wheel, no Python deps).
       dcap-qvl = python.pkgs.buildPythonPackage rec {
         pname = "dcap-qvl";
@@ -261,8 +262,6 @@
             }))
             ps.openai
             chutes-e2ee
-          ]
-          ++ lib.optionals withAttestation [
             dcap-qvl
             nv-attestation-sdk
           ]
@@ -273,8 +272,8 @@
     # included) plus the Python environment, and launches it via the CLI entry
     # point (generate_config -> E2EE install -> litellm).
     # -----------------------------------------------------------------------
-    mkProxy = pkgs: {withAttestation ? false}: let
-      env = mkChutesPython pkgs {inherit withAttestation;};
+    mkProxy = pkgs: let
+      env = mkChutesPython pkgs;
     in
       pkgs.stdenv.mkDerivation {
         pname = "litellm-proxy";
@@ -339,19 +338,20 @@
           withFirewall = !homeManager;
         })
       ];
-      services.litellm.package = lib.mkDefault (mkProxy pkgs {withAttestation = true;});
+      services.litellm.package = lib.mkDefault (mkProxy pkgs);
     };
   in {
     packages = forAllSystems (
       system: let
         pkgs = import nixpkgs {inherit system;};
       in {
-        default = mkProxy pkgs {};
-        litellm = mkProxy pkgs {};
-        # Same proxy with the optional Intel DCAP / NVIDIA SDKs baked in.
-        attestation = mkProxy pkgs {withAttestation = true;};
-        python = mkChutesPython pkgs {};
-        python-attestation = mkChutesPython pkgs {withAttestation = true;};
+        default = mkProxy pkgs;
+        litellm = mkProxy pkgs;
+        # Aliases retained for compatibility; they are the same derivations as
+        # the defaults (there is no reduced-SDK variant).
+        attestation = mkProxy pkgs;
+        python = mkChutesPython pkgs;
+        python-attestation = mkChutesPython pkgs;
       }
     );
 
@@ -365,7 +365,7 @@
     devShells = forAllSystems (
       system: let
         pkgs = import nixpkgs {inherit system;};
-        python = mkChutesPython pkgs {};
+        python = mkChutesPython pkgs;
       in {
         default = pkgs.mkShell {
           packages = [

@@ -51,7 +51,13 @@ async def _collect(wrapper):
             if chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
         usage = getattr(chunk, "usage", None) or usage
-    return {"content": content, "reasoning": reasoning, "tool_calls": tool_calls, "finish_reason": finish_reason, "usage": usage}
+    return {
+        "content": content,
+        "reasoning": reasoning,
+        "tool_calls": tool_calls,
+        "finish_reason": finish_reason,
+        "usage": usage,
+    }
 
 
 def test_registration_and_encryption(mock_server):
@@ -172,21 +178,15 @@ def test_missing_api_key_raises(monkeypatch):
 
 
 def test_attestation_gate_fails_closed(mock_server):
-    """With CHUTES_VERIFY_ATTESTATION=true the custom provider must refuse to
-    send when the instance evidence does not bind, and must not invoke."""
-    import os
-
+    """The attestation gate is always on: bad evidence is refused, never invoked."""
     from chutes_litellm import attestation as att
 
     att._verify_cache.clear()
     mock_server.state.evidence_ok = False
-    os.environ["CHUTES_VERIFY_ATTESTATION"] = "true"
     try:
         with pytest.raises(Exception) as excinfo:
             asyncio.run(_call(mock_server, api_key="cpk_custom_att"))
         assert "attestation failed" in str(excinfo.value)
         assert mock_server.state.invokes == []
     finally:
-        os.environ.pop("CHUTES_VERIFY_ATTESTATION", None)
         mock_server.state.evidence_ok = True
-

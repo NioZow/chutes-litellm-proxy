@@ -207,7 +207,7 @@ sequenceDiagram
     C->>L: GET /e2e/instances/{chute_id}
     L-->>C: instances [instance_id, e2e_pubkey, nonces, nonce_expires_in]
 
-    Note over C: (optional) attest the instance key<br/>see attestation.md
+    Note over C: attest the instance key (always on)<br/>see attestation.md
 
     C->>C: response_pk/sk = MLKEM.keygen()<br/>mlkem_ct, ss = MLKEM.encrypt(instance e2e_pubkey)<br/>key = HKDF(ss, salt=mlkem_ct[:16], info="e2e-req-v1")
     C->>C: blob = mlkem_ct || nonce || ChaCha20(json+gzip+response_pk) || tag
@@ -244,7 +244,7 @@ sequenceDiagram
 | HKDF-SHA256 | Per-request, per-direction independent keys | — |
 | ChaCha20-Poly1305 | Confidentiality **and** integrity of prompt/reply | Metadata (model, sizes, timing) |
 | Ephemeral `response_pk/sk` | Reply cannot be read by the server's long-term key compromise later | Request was already protected by the instance long-term key |
-| Attestation (see [attestation.md](./attestation.md)) | The instance key is bound into genuine TDX/GPU evidence, optionally hardware-rooted | That the code inside the TEE is honest |
+| Attestation (see [attestation.md](./attestation.md)) | The instance key is bound into genuine TDX/GPU evidence, hardware-rooted by mandatory DCAP/NRAS checks | That the code inside the TEE is honest; model weights are not attested |
 
 ---
 

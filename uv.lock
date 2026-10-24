@@ -446,8 +446,10 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "chutes-e2ee" },
+    { name = "dcap-qvl" },
     { name = "httpx" },
     { name = "litellm", extra = ["proxy"] },
+    { name = "nv-attestation-sdk" },
     { name = "openai" },
     { name = "pyyaml" },
 ]
@@ -467,9 +469,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "chutes-e2ee", git = "https://github.com/niozow/chutes-e2ee-transport.git" },
+    { name = "dcap-qvl", specifier = ">=0.6.3" },
     { name = "dcap-qvl", marker = "extra == 'attestation'", specifier = ">=0.6.3" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "litellm", extras = ["proxy"], specifier = ">=1.100.0,<1.101.0" },
+    { name = "nv-attestation-sdk", specifier = ">=2.7.3" },
     { name = "nv-attestation-sdk", marker = "extra == 'attestation'", specifier = ">=2.7.3" },
     { name = "openai", specifier = ">=1.40" },
     { name = "pyyaml", specifier = ">=6" },

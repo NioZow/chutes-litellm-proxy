@@ -15,6 +15,11 @@ dist/
 /chutes-e2ee-transport/
 /litellm/
 
+# Upstream reference checkouts used while porting the attestation verifier
+# (not submodules, not committed). See ATTESTATION_PLAN.md.
+/chutes-api/
+/sek8s/
+
 # nv-attestation-sdk writes these to the CWD when imported
 attestation_sdk.log
 verifier.log

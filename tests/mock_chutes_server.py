@@ -50,8 +50,26 @@ MODEL_ID = "Test/Model-TEE"
 CHUTE_ID = "11111111-2222-4333-8444-555555555555"
 INSTANCE_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
-QUOTE_REPORT_DATA_OFFSET = 48 + 584 - 64  # see chutes_litellm.attestation._extract_report_data
-QUOTE_LEN = 640
+# TDX quote layout used by the verifier: 48-byte header + 584-byte TD-REPORT.
+QUOTE_HEADER_LEN = 48
+QUOTE_REPORT_LEN = 584
+QUOTE_LEN = QUOTE_HEADER_LEN + QUOTE_REPORT_LEN
+TD_REPORT_OFFSET = QUOTE_HEADER_LEN
+QUOTE_REPORT_DATA_OFFSET = TD_REPORT_OFFSET + 520
+QUOTE_TD_ATTRIBUTES_OFFSET = TD_REPORT_OFFSET + 120
+
+# Fixed test measurements, mirrored by the fake measurement provider in conftest.
+MOCK_MRTD = "11" * 48
+MOCK_RTMR0 = "22" * 48
+MOCK_RTMR1 = "33" * 48
+MOCK_RTMR2 = "44" * 48
+MOCK_RTMR3 = "55" * 48
+MOCK_TD_ATTRIBUTES = "00" * 8
+
+# Usable NVIDIA evidence shape (the SDK wants arch + certificate + evidence).
+MOCK_GPU_ARCH = "HOPPER"
+MOCK_GPU_CERTIFICATE = "Y2VydGlmaWNhdGU="
+MOCK_GPU_EVIDENCE = "ZXZpZGVuY2U="
 
 
 @dataclass
@@ -75,6 +93,9 @@ class MockState:
     model_id: str = MODEL_ID
     chute_id: str = CHUTE_ID
     instance_id: str = INSTANCE_ID
+    # When set, /e2e/instances advertises this key to the transport while the
+    # evidence endpoint keeps signing for ``pubkey_b64`` (TOCTOU substitution).
+    discovery_pubkey_b64: str | None = None
 
     # attestation signing identity
     _sign_key: rsa.RSAPrivateKey = None  # type: ignore[assignment]
@@ -118,36 +139,128 @@ class MockState:
         return self.invokes[-1]
 
 
-def build_evidence(state: MockState, digest: str, nonce: str) -> dict[str, Any]:
-    """Build a plausible evidence blob.  When ``state.evidence_ok`` is False the
-    binding digest is replaced so every binding check must fail."""
+def cert_public_key_hash(state: MockState) -> str:
+    """SHA-256 of the mock certificate's DER SubjectPublicKeyInfo public key."""
+    import hashlib
+
     state.ensure_signing_identity()
-    bind = digest if state.evidence_ok else ("0" * 64)
+    der = state._sign_cert.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return hashlib.sha256(der).hexdigest().lower()
 
+
+def build_quote(state: MockState, digest: str, *, bind: bool = True, cert_bind: bool = True) -> bytes:
+    """Build a syntactically valid TDX v4 quote with the fixed test measurements.
+
+    ``bind=False`` replaces the report-data digest with zeros (unbound/legacy
+    evidence); ``cert_bind=False`` replaces the certificate hash half with zeros
+    (a quote that does not bind the signing certificate).
+    """
+    import struct
+
+    state.ensure_signing_identity()
     quote = bytearray(QUOTE_LEN)
-    # report_data holds the raw 32-byte digest (see chutes-api tee-verification.md)
-    quote[QUOTE_REPORT_DATA_OFFSET : QUOTE_REPORT_DATA_OFFSET + 64] = bytes.fromhex(bind).ljust(64, b"\x00")
+    struct.pack_into("<HHI16s20s", quote, 0, 4, 2, 0x81, b"\x00" * 16, b"\x00" * 20)
+    quote[TD_REPORT_OFFSET + 136 : TD_REPORT_OFFSET + 184] = bytes.fromhex(MOCK_MRTD)
+    quote[TD_REPORT_OFFSET + 328 : TD_REPORT_OFFSET + 376] = bytes.fromhex(MOCK_RTMR0)
+    quote[TD_REPORT_OFFSET + 376 : TD_REPORT_OFFSET + 424] = bytes.fromhex(MOCK_RTMR1)
+    quote[TD_REPORT_OFFSET + 424 : TD_REPORT_OFFSET + 472] = bytes.fromhex(MOCK_RTMR2)
+    quote[TD_REPORT_OFFSET + 472 : TD_REPORT_OFFSET + 520] = bytes.fromhex(MOCK_RTMR3)
+    quote[QUOTE_TD_ATTRIBUTES_OFFSET : QUOTE_TD_ATTRIBUTES_OFFSET + 8] = bytes.fromhex(MOCK_TD_ATTRIBUTES)
 
-    gpu_evidence = [{"nonce": bind, "gpu_uuid": "00000000-0000-0000-0000-000000000001"}]
+    digest_bytes = bytes.fromhex(digest if bind else "0" * 64)
+    cert_hash = bytes.fromhex(cert_public_key_hash(state)) if cert_bind else bytes(32)
+    quote[QUOTE_REPORT_DATA_OFFSET : QUOTE_REPORT_DATA_OFFSET + 64] = digest_bytes + cert_hash
+    return bytes(quote)
 
+
+def build_gpu_evidence(state: MockState, digest: str, *, bind: bool = True) -> list[dict[str, Any]]:
+    return [
+        {
+            "arch": MOCK_GPU_ARCH,
+            "certificate": MOCK_GPU_CERTIFICATE,
+            "evidence": MOCK_GPU_EVIDENCE,
+            "nonce": digest if bind else "0" * 64,
+        }
+    ]
+
+
+def build_evidence(
+    state: MockState,
+    digest: str,
+    nonce: str,
+    *,
+    instance_id: str | None = None,
+    bind: bool | None = None,
+    cert_bind: bool = True,
+) -> dict[str, Any]:
+    """Build a signed evidence blob.
+
+    ``bind`` defaults to ``state.evidence_ok``; when False the binding digest is
+    zeroed so every digest check must fail.  ``cert_bind=False`` keeps the
+    digest binding but zeroes the certificate hash in the quote.
+    """
+    state.ensure_signing_identity()
+    if bind is None:
+        bind = state.evidence_ok
+    owner = state.instance_id if instance_id is None else instance_id
+
+    quote = build_quote(state, digest, bind=bind, cert_bind=cert_bind)
+    gpu_evidence = build_gpu_evidence(state, digest, bind=bind)
+
+    # Production producer shape: quote + nvtrust_evidence nested under evidence.
     attested_body = json.dumps(
         {
-            "instance_id": state.instance_id,
-            "digest": bind,
-            "quote": base64.b64encode(bytes(quote)).decode(),
-            "gpu_evidence": gpu_evidence,
+            "instance_id": owner,
+            "digest": digest if bind else "0" * 64,
+            "evidence": {
+                "tdx_quote": base64.b64encode(quote).decode(),
+                "nvtrust_evidence": json.dumps(gpu_evidence),
+            },
         }
     ).encode()
     cert_der = state.cert_der()
-    evidence = {
-        "instance_id": state.instance_id,
-        "quote": base64.b64encode(bytes(quote)).decode(),
+    return {
+        "instance_id": owner,
+        "quote": base64.b64encode(quote).decode(),
         "gpu_evidence": gpu_evidence,
         "certificate": base64.b64encode(cert_der).decode(),
         "signature": base64.b64encode(state.sign(attested_body)).decode(),
         "attested_body": base64.b64encode(attested_body).decode(),
     }
-    return evidence
+
+
+def digest_for(nonce: str, pubkey_b64: str) -> str:
+    """The binding digest used by the verifier: sha256(nonce + e2e_pubkey)."""
+    import hashlib
+
+    return hashlib.sha256((nonce + pubkey_b64).encode()).hexdigest().lower()
+
+
+def build_evidence_for(
+    state: MockState,
+    instance_id: str,
+    pubkey_b64: str,
+    nonce: str,
+    *,
+    bind: bool = True,
+    cert_bind: bool = True,
+) -> dict[str, Any]:
+    """Build evidence for an arbitrary ``(instance_id, pubkey, nonce)``.
+
+    Uses the mock signing identity and the fixed TDX measurements, so it works
+    for multi-instance/TOCTOU tests without touching the server state.
+    """
+    return build_evidence(
+        state,
+        digest_for(nonce, pubkey_b64),
+        nonce,
+        instance_id=instance_id,
+        bind=bind,
+        cert_bind=cert_bind,
+    )
 
 
 def _chat_completion_body(model_payload: dict[str, Any]) -> dict[str, Any]:
@@ -243,7 +356,12 @@ def _stream_chunks_for(model_payload: dict[str, Any], scenario: str) -> list[dic
                         "delta": {
                             "role": "assistant",
                             "tool_calls": [
-                                {"index": 0, "id": "call_abc", "type": "function", "function": {"name": "get_weather", "arguments": ""}}
+                                {
+                                    "index": 0,
+                                    "id": "call_abc",
+                                    "type": "function",
+                                    "function": {"name": "get_weather", "arguments": ""},
+                                }
                             ],
                         },
                         "finish_reason": None,
@@ -353,9 +471,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/v1/models":
             self._send(
                 200,
-                json.dumps(
-                    {"object": "list", "data": [{"id": s.model_id, "chute_id": s.chute_id}]}
-                ).encode(),
+                json.dumps({"object": "list", "data": [{"id": s.model_id, "chute_id": s.chute_id}]}).encode(),
             )
         elif path.startswith("/e2e/instances/"):
             body = json.dumps(
@@ -363,7 +479,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "instances": [
                         {
                             "instance_id": s.instance_id,
-                            "e2e_pubkey": s.pubkey_b64,
+                            "e2e_pubkey": s.discovery_pubkey_b64 or s.pubkey_b64,
                             "nonces": list(s.nonce_pool),
                         }
                     ],
@@ -419,7 +535,9 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
         if not is_stream:
-            self._send(200, _encrypt_response(payload, _response_body_for(payload, s.scenario)), "application/octet-stream")
+            self._send(
+                200, _encrypt_response(payload, _response_body_for(payload, s.scenario)), "application/octet-stream"
+            )
             return
 
         # Streaming reply: e2e_init frame + encrypted OpenAI SSE events.

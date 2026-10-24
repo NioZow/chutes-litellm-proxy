@@ -30,27 +30,48 @@ docker build -t litellm-proxy . && CHUTES_API_KEY=cpk_... ./scripts/run.sh
 ## Security model
 
 Chutes `*-TEE` traffic is end-to-end encrypted with post-quantum ML-KEM-768 +
-ChaCha20-Poly1305, and (optionally) only sent to instances whose TDX/GPU
-attestation verifies. The full explanation lives in [`docs/`](./docs/README.md):
+ChaCha20-Poly1305, and only sent to instances whose TDX/GPU attestation verifies.
+Attestation is **always on**: there is no runtime, CLI, environment-variable or
+Nix option that disables it. The full explanation lives in
+[`docs/`](./docs/README.md):
 
 - **[docs/e2ee-encryption.md](./docs/e2ee-encryption.md)** — threat model, the
   primitives, the exact wire/blob format with byte offsets, request/reply key
   establishment, streaming, nonces and replay, and what is *not* protected.
 - **[docs/attestation.md](./docs/attestation.md)** — the evidence envelope, the
   binding checks, Intel DCAP + NVIDIA NRAS hardware roots, fail-closed
-  semantics, caching, the `CHUTES_*` knobs and the `chutes-verify-attestation`
-  CLI.
+  semantics, caching, the fixed endpoints, the TTL knobs and the
+  `chutes-verify-attestation` CLI.
 
-Hardware-root verification is optional and packaged like any other extra:
+Hardware-root verification is mandatory, not an extra: `dcap-qvl` (Intel DCAP),
+`nv-attestation-sdk` (NVIDIA NRAS) and the code that enforces the
+published-measurement policy ship in the base install, the Docker image and the
+default Nix package. Every evidence
+blob runs the whole chain:
+
+1. RSA-PKCS1v15/SHA-256 verification of the signed evidence body,
+2. mandatory Intel DCAP quote verification (`UpToDate`, no advisories, debug
+   off),
+3. exact `report_data` binding to `sha256(nonce + e2e_pubkey)` and
+   `sha256(cert SPKI)`,
+4. exact MRTD + RTMR0-3 match against a published Chutes measurement,
+5. mandatory NVIDIA NRAS GPU verification with GPU-count equality,
+6. an id+pubkey-pinned instance filter before `/e2e/invoke`.
+
+TLS verification is always on too. Encrypted hosts are fixed: the Chutes API and
+model-listing endpoints are always `https://api.chutes.ai` and
+`https://llm.chutes.ai`, and only those hosts are encrypted and attested. There
+is no endpoint or host override.
 
 ```sh
-uv sync --extra attestation     # adds dcap-qvl + nv-attestation-sdk
+uv sync --extra attestation     # alias only; SDKs are already base dependencies
 nix build .#attestation         # same, as a native Nix package
 ```
 
-The base install, the Docker image and the offline test suite work without it;
-asking for `CHUTES_VERIFY_QUOTE=true` / `CHUTES_VERIFY_GPU=true` without the
-SDKs fails closed (the request is refused).
+**Scope note — model weights.** Attestation covers the VM firmware/boot
+chain/rootfs and the GPU hardware; it does **not** bind a model id, revision or
+weight digest. See
+[Model weights are not attested](./docs/attestation.md#14-model-weights-are-not-attested).
 
 ## Supported providers
 
@@ -181,7 +202,15 @@ library (`mkService`), so the same proxy can run as a **root system service**, a
 | home-manager (macOS) | `homeModules.darwin` | your user (`launchd.agents`) | home-manager configuration |
 
 All four share the same options (see [`./options.nix`](./options.nix)) and the
-same package; they differ in *who runs the unit* and *who can declare it*:
+same package; they differ in *who runs the unit* and *who can declare it*.
+Verification is unconditional: no Nix option disables attestation, DCAP,
+measurement matching, GPU/NRAS verification or TLS verification. The
+attestation-related options only select the measurement source, TTLs and
+PCCS/NRAS endpoints (`teeMeasurementsFile`, `teeMeasurementsTtl`,
+`attestationTtl`, `attestationFailureTtl`, `attestationModelMapTtl`,
+`dcapPccsUrl`, `nvidiaNrasUrl`), alongside `customProvider` and the logging
+options. The Chutes API and model-listing endpoints are fixed constants, not
+Nix options.
 
 - **root — `nixosModules.default`** starts at boot without a login, applies
   systemd hardening (`DynamicUser`, `StateDirectory`, `ProtectSystem=strict`, …)
@@ -454,25 +483,28 @@ OpenAI-compatible provider) and layers the encryption on underneath it:
   LiteLLM's documented `custom_provider_map` extension point; it owns its own
   `chutes-e2ee` transport and speaks OpenAI chat protocol over it, with **no**
   LiteLLM-internal patching (non-stream + stream, tool calls, reasoning_content,
-  usage, error mapping).  It also honours the same
-  `CHUTES_VERIFY_ATTESTATION` / `CHUTES_VERIFY_QUOTE` / `CHUTES_VERIFY_GPU`
-  gate as the native transport.  Enable with `CHUTES_CUSTOM_PROVIDER=true` and configure
-  models under the `chutes_e2ee/` prefix (e.g. `chutes_e2ee/Qwen/Qwen3.5-397B-A17B-TEE`).
-* `src/chutes_litellm/attestation.py` — optional **GPU/TEE attestation
-  verification** (`CHUTES_VERIFY_ATTESTATION=true`): before encrypting, it
-  fetches the instance's TDX + NVIDIA evidence, verifies the key-possession
-  signature and that the instance public key is bound to attested hardware, and
-  refuses to send (fail closed) otherwise.  **Every** instance listed by
+  usage, error mapping).  It uses the same always-on attestation gate as the
+  native transport. Enable with `CHUTES_CUSTOM_PROVIDER=true` and configure
+  models under the `chutes_e2ee/` prefix (e.g.
+  `chutes_e2ee/Qwen/Qwen3.5-397B-A17B-TEE`).
+* `src/chutes_litellm/attestation.py` + `src/chutes_litellm/tee/` — **mandatory,
+  always-on TDX/GPU attestation verification**. Before encrypting, the gate
+  fetches the instance's evidence and: verifies the RSA-PKCS1v15/SHA-256
+  signature over `attested_body`; runs Intel DCAP on the TDX quote; requires
+  `report_data[:32] == sha256(nonce + e2e_pubkey)` and
+  `report_data[32:64] == sha256(cert_pubkey_DER)` with exact byte comparisons;
+  requires the quote's MRTD + RTMR0-3 to match a published Chutes measurement;
+  and checks the GPU evidence against NVIDIA NRAS with GPU-count equality. It
+  refuses to send (fail closed) otherwise. **Every** instance listed by
   `/e2e/instances` must verify — the transport chooses an instance itself, so a
   partially-verified chute would still let a request land on the unverified
-  instance.  The gate also runs as the transport's **instance-selection filter**
-  (see `chutes-e2ee-transport/src/chutes_e2ee/discovery.py`), so the encrypted
-  request can only go to an instance that was verified in the same decision.
-  For full Intel DCAP / NVIDIA NRAS verification install the `attestation` extra
-  (`uv sync --extra attestation`, which adds `dcap-qvl` + `nv-attestation-sdk`)
-  and set `CHUTES_VERIFY_QUOTE=true` / `CHUTES_VERIFY_GPU=true` (honoured by both
-  the native transport and the custom provider).  See
-  [docs/attestation.md](./docs/attestation.md) for the full trust chain.
+  instance. The gate also runs as the transport's **instance-selection filter**
+  (see `chutes-e2ee-transport/src/chutes_e2ee/discovery.py`), pinning the
+  verified `{instance_id: e2e_pubkey}` mapping so a racing discovery response
+  cannot substitute a different key for the same id. DCAP and NVIDIA SDKs are
+  base dependencies; `uv sync --extra attestation` remains a backward-compatible
+  alias. See [docs/attestation.md](./docs/attestation.md) for the full trust
+  chain.
 
   > **Note — `python-ecdsa` (CVE-2024-23342).** The Nix build pins
   > `python-ecdsa`, a transitive dependency of `nv-attestation-sdk` /
@@ -495,24 +527,28 @@ Relevant environment variables:
 
 | Variable                    | Default                     | Meaning                                              |
 | --------------------------- | --------------------------- | ---------------------------------------------------- |
-| `CHUTES_E2EE_HOSTS`         | `llm.chutes.ai,api.chutes.ai` | Hosts whose traffic is end-to-end encrypted        |
-| `CHUTES_E2EE_API_BASE`      | `https://api.chutes.ai`     | E2EE/attestation API base (override for tests)       |
-| `CHUTES_E2EE_MODELS_BASE`   | `https://llm.chutes.ai`     | Model-listing base used for model→chute resolution   |
-| `CHUTES_VERIFY_ATTESTATION` | `true`                      | Enable the fail-closed attestation gate              |
-| `CHUTES_VERIFY_QUOTE`       | `true`                      | Require Intel DCAP TDX-quote verification            |
-| `CHUTES_VERIFY_GPU`         | `true`                      | Require NVIDIA attestation-SDK GPU verification      |
+| `CHUTES_TEE_MEASUREMENTS_FILE` | unset                    | Local YAML measurement policy (Chutes schema); when set it is the **sole** source |
+| `CHUTES_TEE_MEASUREMENTS_TTL` | `3600`                    | How long the published measurement list is cached (seconds) |
 | `CHUTES_ATTESTATION_TTL`    | `300`                       | How long a verified chute stays trusted (seconds)    |
 | `CHUTES_ATTESTATION_FAILURE_TTL` | `30`                   | How long a failed verdict is cached (seconds)        |
 | `CHUTES_ATTESTATION_MODEL_MAP_TTL` | `300`               | How long a model→chute id lookup is cached (seconds) |
 | `CHUTES_DCAP_PCCS_URL`      | dcap-qvl default (Phala `pccs.phala.network`) | Intel/Phala collateral (PCCS) base for DCAP |
 | `CHUTES_NVIDIA_NRAS_URL`    | `https://nras.attestation.nvidia.com/v3/attest/gpu` | NVIDIA remote attestation (NRAS) endpoint |
+| `CHUTES_CUSTOM_PROVIDER`    | `false`                     | Serve Chutes models through the `chutes_e2ee/` custom provider |
 | `CHUTES_LOG_LEVEL`          | `info`                      | Logger level: debug, info, warning, error, critical  |
-| `CHUTES_LOG_FILE`           | `~/.local/state/chutes_litellm/proxy.log` | Optional log file path; set `none` to disable |
+| `CHUTES_LOG_FILE`           | `~/.local/state/chutes_litellm/proxy.log` | Log file path; set `none` to disable file logging |
+
+The Chutes API and model-listing endpoints are **fixed constants**, not
+configuration: `https://api.chutes.ai` and `https://llm.chutes.ai`. There is no
+base-URL or host override. The encrypted host set is therefore always exactly
+those two Chutes hosts. TLS certificate verification is always on and has no
+setting.
 
 **Logging.** All attestation and E2EE events are emitted through a shared logger that writes to both stderr (visible in `docker logs`, `journalctl`, launchd logfiles, etc.) and an optional on-disk file.  The file path defaults to `~/.local/state/chutes_litellm/proxy.log` and is overridable via `CHUTES_LOG_FILE` (set to `none` to disable file logging).  The level is controlled by `CHUTES_LOG_LEVEL` (default `info`).
 
-**Overhead.** Attestation is **on by default**, so every request is guarded. This
-trusts that the proxy verifies TEE/GPU evidence before encrypting traffic. You can opt out by setting `CHUTES_VERIFY_ATTESTATION=false`, but that removes all guarantees that the instance you are talking to is running on trusted hardware.
+**Overhead.** Attestation is always on, so every request is guarded. There is no
+supported way to turn it off; the TTL settings above trade freshness for lower
+scanning frequency, not whether verification runs.
 
 
 The E2EE transport itself is also connection-oriented: HTTP clients/transports
@@ -525,9 +561,11 @@ trip.
 Manual attestation check:
 
 ```sh
-CHUTES_API_KEY=cpk_... ./scripts/verify_attestation.py --model "Qwen/Qwen3.5-397B-A17B-TEE"
-# full hardware roots (needs dcap-qvl + nv-attestation-sdk):
-CHUTES_API_KEY=cpk_... ./scripts/verify_attestation.py --chute <uuid> --verify-quote --verify-gpu
+# DCAP, measurement matching and NVIDIA NRAS verification are always on
+CHUTES_API_KEY=cpk_... chutes-verify-attestation --model "Qwen/Qwen3.5-397B-A17B-TEE"
+
+# per-instance check details
+CHUTES_API_KEY=cpk_... chutes-verify-attestation --chute <uuid> --details
 ```
 
 The `chutes-e2ee-transport` package is installed in the image at build time.
@@ -547,7 +585,8 @@ src/chutes_litellm/     # The Python package (installable via uv or nix)
   generate_config.py    #   expands wildcard providers into a generated config
   e2ee_litellm.py       #   host-scoped swap of litellm's OpenAI-SDK http clients (install())
   custom_provider.py    #   optional self-contained chutes_e2ee CustomLLM provider (no patching)
-  attestation.py        #   optional TDX/GPU attestation verification (fail-closed)
+  attestation.py        #   fail-closed TDX/GPU attestation gate (network/cache layer)
+  tee/                  #   mandatory evidence, DCAP quote, measurement and GPU verifiers
   verify.py             #   attestation CLI (chutes-verify-attestation)
   cli.py                #   chutes-litellm-proxy entry: generate -> E2EE install -> litellm
 scripts/                # Runnable tools & thin wrappers (source checkouts)
@@ -597,14 +636,19 @@ expires—it performs one scan of the entire chute:
    stable chute UUID (cached for `CHUTES_ATTESTATION_MODEL_MAP_TTL`).
 2. **Instance enumeration** (`GET /e2e/instances/<chute>`) — lists every live
    instance with its ML-KEM public key.
-3. **Evidence fetch** (`GET /chutes/<chute>/evidence`) — fetches the TDX quote and
-   NVIDIA GPU evidence blobs for *all* instances in a single request.
-4. **Per-instance verification** — for each instance the gate checks:
-   - key-possession signature (software binding),
-   - TDX `report_data` binds the instance pubkey,
-   - GPU evidence binds the instance pubkey,
-   - optional Intel DCAP quote root verification,
-   - optional NVIDIA NRAS GPU root verification.
+3. **Evidence fetch** (`GET /chutes/<chute>/evidence`) — fetches the signed TDX
+   quote and NVIDIA GPU evidence blobs for *all* instances in a single request.
+4. **Measurement policy** (`GET /servers/tee/measurements`, cached for
+   `CHUTES_TEE_MEASUREMENTS_TTL`, default 3600 s; or a local
+   `CHUTES_TEE_MEASUREMENTS_FILE`, which becomes the sole source).
+5. **Per-instance verification** — for each instance the gate checks:
+   - RSA-PKCS1v15-SHA256 signature over the signed `attested_body`,
+   - Intel DCAP quote verification (always on; `UpToDate`, no advisories, no debug),
+   - TDX `report_data[:32]` exactly binds `sha256(nonce + e2e_pubkey)`,
+   - TDX `report_data[32:64]` exactly binds `sha256(cert_pubkey_DER)`,
+   - the quote's MRTD + RTMR0-3 exactly match a published Chutes measurement,
+   - NVIDIA NRAS GPU verification, with the GPU count matching that
+     measurement.
 
 Only when **every** instance passes is the chute accepted. If any instance fails,
 the entire chute is rejected (fail-closed). The scan is
@@ -614,9 +658,11 @@ rest block until the leader stores the result in the shared cache.
 
 ### Steady-state overhead
 
-After a chute is verified, requests are gated by a **dict lookup** on a cache key
-`(chute_id, verify_quote, verify_gpu, check_signature)`. The lookup is
-`O(1)`, adds ~0.05–0.1 ms of local CPU, and involves **no network traffic**.
+After a chute is verified, requests are gated by a **dict lookup** on the
+`chute_id` cache key. The cached value is the verified
+`{instance_id: e2e_pubkey}` mapping, which the transport filter also uses to pin
+each id to the exact key that was attested. The lookup is `O(1)`, adds
+~0.05–0.1 ms of local CPU, and involves **no network traffic**.
 
 | TTL knob | Default | Effect |
 |----------|---------|--------|
@@ -628,28 +674,24 @@ After a chute is verified, requests are gated by a **dict lookup** on a cache ke
 
 The cryptographic work per instance (signature verification, SHA-256 digest
 checks, DCAP quote parsing) is measured in sub-milliseconds on modern hardware.
-The dominant cost is the **three sequential HTTPS round trips** (model listing,
-instances, evidence) to Chutes' control plane, which together take **150–400 ms**
-under typical network conditions. The optional DCAP / NVIDIA verifier calls add
-one or two extra HTTPS round trips each (Intel PCCS and NVIDIA NRAS).
+The dominant cost is the **sequential HTTPS round trips** (model listing,
+instances, evidence, and a periodically cached measurement fetch) to Chutes'
+control plane, which together take **150–400 ms** under typical network
+conditions. DCAP adds a collateral fetch to Intel PCCS, and NVIDIA NRAS adds
+another round trip.
 
 Re-verification only happens on cache expiry, so a busy deployment quickly
 settles into the fast path. You can increase `CHUTES_ATTESTATION_TTL` to trade
 freshness for lower scanning frequency; many production deployments run with
 600–1800 s.
 
-### Disabling attestation
+### No disable switch
 
-If you trust the network and wish to eliminate all scanning latency, set:
-
-```sh
-CHUTES_VERIFY_ATTESTATION=false
-```
-
-This also disables the custom provider's pre-send gate and the transport's
-instance filter. The E2EE encryption layer itself remains active—traffic is
-still encrypted with ML-KEM-768 + ChaCha20-Poly1305—only the hardware-trust
-check is bypassed.
+There is no environment variable, CLI flag, or Nix option that turns attestation
+off. The gate, Intel DCAP, published-measurement matching, NVIDIA NRAS and TLS
+verification are unconditional; a chute that cannot be verified is refused (fail
+closed). The TTL settings above only change how long a verdict is cached — never
+whether it is checked.
 
 ### Why this matters for *-TEE models
 
@@ -657,7 +699,7 @@ Attestation is the mechanism that lets you trust that the `*-TEE` instance is
 truly running inside an Intel TDX confidential VM with a GPU in
 confidential-compute mode. Without it, the proxy encrypts to an arbitrary
 instance's public key with no guarantee that the remote machine is the hardware
-it claims to be. The default-on behaviour keeps that guarantee without requiring
+it claims to be. The always-on behaviour keeps that guarantee without requiring
 operators to remember to enable it.
 
 | Path       | Command                                              | Generates config + installs E2EE |

@@ -9,7 +9,6 @@ plaintext request ever reaches the ``/v1/chat/completions`` path.
 
 import asyncio
 import json
-import os
 
 import httpx
 import pytest
@@ -194,22 +193,28 @@ def test_router_proxy_path_is_e2e_encrypted(mock_server):
 
 
 def test_instance_filter_keeps_only_verified_instances(monkeypatch):
-    """The filter intersects the transport's discovery with the verified set."""
+    """The filter pins both the verified id *and* its e2e_pubkey."""
     from chutes_litellm import attestation as att
     from chutes_litellm import e2ee_litellm as el
 
     a = att.InstanceInfo("inst-a", "pk-a", [])
     b = att.InstanceInfo("inst-b", "pk-b", [])
-    monkeypatch.setattr(att, "verify_chute", lambda *args, **kwargs: ["inst-a"])
+    monkeypatch.setattr(att, "verify_chute", lambda *args, **kwargs: {"inst-a": "pk-a"})
 
     transport = object.__new__(el._ChutesScopedTransport)
     transport._api_key = "cpk_filter"
     transport._api_key_provider = None
-    transport._verify_quote = False
-    transport._verify_gpu = False
 
     kept = transport._instance_filter("some-chute", [a, b])
     assert [i.instance_id for i in kept] == ["inst-a"]
+
+    # Same id, different pubkey: the substituted key must be dropped...
+    substituted = att.InstanceInfo("inst-a", "pk-evil", [])
+    assert transport._instance_filter("some-chute", [substituted]) == []
+
+    # ...and a different id carrying the verified key is not accepted either.
+    wrong_id = att.InstanceInfo("inst-c", "pk-a", [])
+    assert transport._instance_filter("some-chute", [wrong_id]) == []
 
 
 def _record_transport_ctor(monkeypatch):
@@ -236,34 +241,38 @@ def _record_transport_ctor(monkeypatch):
     return captured
 
 
-def test_stock_transport_compatible_when_attestation_off(monkeypatch):
-    """With the gate off we must not pass the fork-only `instance_filter` kwarg,
-    so a stock `chutes-e2ee` (no hook) keeps working."""
+def test_filter_is_always_installed(monkeypatch):
+    """The attestation-backed instance filter has no opt-out."""
     from chutes_litellm import e2ee_litellm as el
 
     captured = _record_transport_ctor(monkeypatch)
-    os.environ["CHUTES_VERIFY_ATTESTATION"] = "false"
-    try:
-        el._ChutesScopedTransport("cpk", hosts={"h"}, verify=False)
-        assert "instance_filter" not in captured
+    el._ChutesScopedTransport("cpk", hosts={"h"})
+    assert callable(captured.get("instance_filter"))
 
-        captured.clear()
-        el._ChutesScopedAsyncTransport("cpk", hosts={"h"}, verify=False)
-        assert "instance_filter" not in captured
-    finally:
-        os.environ.pop("CHUTES_VERIFY_ATTESTATION", None)
+    captured.clear()
+    el._ChutesScopedAsyncTransport("cpk", hosts={"h"})
+    assert callable(captured.get("instance_filter"))
 
 
-def test_filter_is_passed_when_attestation_on(monkeypatch):
+def test_e2ee_hosts_are_derived_and_env_overrides_are_ignored(monkeypatch):
+    """Hosts follow the fixed module constants; every host env var is inert."""
     from chutes_litellm import e2ee_litellm as el
+    from chutes_litellm import endpoints
 
-    captured = _record_transport_ctor(monkeypatch)
-    os.environ["CHUTES_VERIFY_ATTESTATION"] = "true"
-    try:
-        el._ChutesScopedTransport("cpk", hosts={"h"}, verify=False)
-        assert callable(captured.get("instance_filter"))
-    finally:
-        os.environ.pop("CHUTES_VERIFY_ATTESTATION", None)
+    monkeypatch.setattr(endpoints, "API_BASE", "https://api.fixed.test")
+    monkeypatch.setattr(endpoints, "MODELS_BASE", "https://llm.fixed.test")
+    monkeypatch.setenv("CHUTES_E2EE_HOSTS", "evil.example")
+    monkeypatch.setenv("CHUTES_E2EE_API_BASE", "https://api.private.test")
+    monkeypatch.setenv("CHUTES_E2EE_MODELS_BASE", "https://llm.private.test")
+
+    hosts = el._e2ee_hosts()
+    # derived from the fixed endpoints plus the canonical Chutes hosts
+    assert {"api.fixed.test", "llm.fixed.test"} <= hosts
+    assert {"llm.chutes.ai", "api.chutes.ai"} <= hosts
+    # neither the env host list nor the removed base overrides are honoured
+    assert "evil.example" not in hosts
+    assert "api.private.test" not in hosts
+    assert "llm.private.test" not in hosts
 
 
 def test_instance_filter_raises_typed_error_on_failure(monkeypatch):
@@ -277,8 +286,6 @@ def test_instance_filter_raises_typed_error_on_failure(monkeypatch):
     transport = object.__new__(el._ChutesScopedTransport)
     transport._api_key = "cpk_filter"
     transport._api_key_provider = None
-    transport._verify_quote = False
-    transport._verify_gpu = False
 
     with pytest.raises(Exception, match="attestation failed"):
         transport._instance_filter("some-chute", [])
@@ -296,13 +303,16 @@ def test_transport_filter_refuses_unverified_instance(mock_server, monkeypatch):
     el._clients.clear()
     el._aclients.clear()
     att._verify_cache.clear()
-    os.environ["CHUTES_VERIFY_ATTESTATION"] = "true"
+
     # Silence the explicit pre-send check so only the transport's instance
     # filter can refuse the chute.
+    async def _skip_verify_request(self, request):
+        return None
+
     monkeypatch.setattr(
         el._ChutesScopedAsyncTransport,
-        "_maybe_verify",
-        lambda self, request: asyncio.sleep(0),
+        "_verify_request",
+        _skip_verify_request,
     )
     mock_server.state.evidence_ok = False
     try:
@@ -322,7 +332,77 @@ def test_transport_filter_refuses_unverified_instance(mock_server, monkeypatch):
         assert "attestation failed" in str(excinfo.value)
         assert mock_server.state.invokes == [], "request reached /e2e/invoke unverified"
     finally:
-        os.environ.pop("CHUTES_VERIFY_ATTESTATION", None)
         mock_server.state.evidence_ok = True
+        el._clients.clear()
+        el._aclients.clear()
+
+
+def test_transport_key_substitution_is_refused_before_invoke(mock_server, monkeypatch):
+    """TOCTOU regression: a substituted pubkey for a verified id must not be used.
+
+    The gate is fed the *real* instance pubkey (monkeypatched ``fetch_instances``),
+    while the transport's own ``/e2e/instances`` discovery receives a different
+    key for the same instance id.  Pinning only the id would let the request go
+    out encrypted to the attacker's key; pinning id+pubkey refuses it before any
+    ``POST /e2e/invoke``.
+    """
+    import base64
+
+    import litellm
+    from pqcrypto.kem.ml_kem_768 import generate_keypair
+
+    from chutes_litellm import attestation as att
+    from chutes_litellm import e2ee_litellm as el
+    from mock_chutes_server import INSTANCE_ID
+
+    ensure_installed()
+    el._clients.clear()
+    el._aclients.clear()
+    att._verify_cache.clear()
+
+    real_pubkey = mock_server.state.pubkey_b64
+    foreign_pk, _ = generate_keypair()
+    mock_server.state.discovery_pubkey_b64 = base64.b64encode(foreign_pk).decode()
+
+    # The attestation GATE sees the real key (and the evidence is signed for it).
+    monkeypatch.setattr(
+        att,
+        "fetch_instances",
+        lambda *a, **k: [att.InstanceInfo(INSTANCE_ID, real_pubkey, [])],
+    )
+
+    try:
+
+        async def call():
+            return await litellm.acompletion(
+                model=f"chutes/{MODEL_ID}",
+                api_base=f"{mock_server.base_url}/v1",
+                api_key="cpk_toctou",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=8,
+                timeout=60,
+            )
+
+        invokes_before = len(mock_server.state.invokes)
+        with pytest.raises(Exception) as excinfo:
+            asyncio.run(call())
+
+        # The SDK wraps transport failures; the root cause must be the
+        # attestation filter refusing the substituted key.
+        chain = []
+        error: BaseException | None = excinfo.value
+        while error is not None:
+            chain.append(str(error))
+            error = error.__cause__ or error.__context__
+        message = "\n".join(chain)
+        assert "instance filter rejected every instance" in message.lower()
+        assert len(mock_server.state.invokes) == invokes_before, "request reached /e2e/invoke with a substituted pubkey"
+        assert any("instances" in p for p in mock_server.state.seen_paths)
+
+        # Prove the gate itself had verified the real id+key: the refusal above
+        # came from the key pin, not from a failed attestation.
+        assert att.verify_chute("cpk_toctou", MODEL_ID, force=True) == {INSTANCE_ID: real_pubkey}
+    finally:
+        mock_server.state.discovery_pubkey_b64 = None
         el._clients.clear()
         el._aclients.clear()

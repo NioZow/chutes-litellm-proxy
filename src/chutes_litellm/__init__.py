@@ -11,9 +11,9 @@ import logging
 import os
 import pathlib as _pathlib
 
-from chutes_litellm import attestation, e2ee_litellm
+from chutes_litellm import attestation, e2ee_litellm, endpoints
 
-__all__ = ["attestation", "e2ee_litellm", "get_logger"]
+__all__ = ["attestation", "e2ee_litellm", "endpoints", "get_logger"]
 
 
 # ---------------------------------------------------------------------------
@@ -70,8 +70,7 @@ def get_logger(name: str = "chutes_litellm") -> logging.Logger:
         raw_path = None
     log_path = _pathlib.Path(raw_path) if raw_path else _DEFAULT_LOG_FILE
     if log_path and not any(
-        isinstance(h, logging.FileHandler) and _pathlib.Path(h.baseFilename) == log_path
-        for h in log.handlers
+        isinstance(h, logging.FileHandler) and _pathlib.Path(h.baseFilename) == log_path for h in log.handlers
     ):
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -10,14 +10,17 @@ evidence, and by refusing to send when it cannot.
 - [2. The trust chain](#2-the-trust-chain)
 - [3. Endpoints and the evidence envelope](#3-endpoints-and-the-evidence-envelope)
 - [4. The checks, and what each one proves](#4-the-checks-and-what-each-one-proves)
-- [5. TDX `report_data` extraction](#5-tdx-report_data-extraction)
-- [6. NVIDIA GPU evidence](#6-nvidia-gpu-evidence)
-- [7. Fail-closed semantics](#7-fail-closed-semantics)
-- [8. Binding attested instances to selection](#8-binding-attested-instances-to-selection)
-- [9. Caching and performance](#9-caching-and-performance)
-- [10. Environment variables](#10-environment-variables)
-- [11. Manual verification (CLI)](#11-manual-verification-cli)
-- [12. Sequence diagram](#12-sequence-diagram)
+- [5. TDX `report_data` extraction and binding](#5-tdx-report_data-extraction-and-binding)
+- [6. Published measurement policy](#6-published-measurement-policy)
+- [7. NVIDIA GPU evidence](#7-nvidia-gpu-evidence)
+- [8. Fail-closed semantics](#8-fail-closed-semantics)
+- [9. Binding attested instances to selection](#9-binding-attested-instances-to-selection)
+- [10. Caching and performance](#10-caching-and-performance)
+- [11. Environment variables](#11-environment-variables)
+- [12. Manual verification (CLI)](#12-manual-verification-cli)
+- [13. Compatibility](#13-compatibility)
+- [14. Model weights are not attested](#14-model-weights-are-not-attested)
+- [15. Sequence diagram](#15-sequence-diagram)
 
 ---
 
@@ -29,61 +32,84 @@ encrypted — to the attacker. The ciphertext would look identical and every
 cryptographic check in the transport would pass.
 
 The defence is to require that the key you are about to encrypt to is _provably
-the key of an Intel TDX instance driving NVIDIA GPUs in Confidential-Compute
-mode_. That proof is the attestation evidence, fetched from Chutes and
-optionally verified against Intel's and NVIDIA's hardware roots.
+the key of an approved Intel TDX instance driving NVIDIA GPUs in
+Confidential-Compute mode_. That proof is the attestation evidence, fetched from
+Chutes and verified against Intel's and NVIDIA's hardware roots plus a published
+Chutes measurement.
 
-Two levels exist, controlled by environment variables:
+Attestation, Intel DCAP quote verification, published-measurement matching,
+NVIDIA NRAS GPU verification and TLS verification are **always on**. There is no
+runtime, CLI, environment-variable or Nix option that disables any of them.
+There is also no evidence-only path that counts as verified: every evidence blob
+runs Intel DCAP, and every chute must satisfy the full chain below.
 
-| Level                                              | Enabled by                                                                                     | Proves                                                                                                                            |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| **Software binding** (default when the gate is on) | `CHUTES_VERIFY_ATTESTATION=true`                                                               | The envelope is signed by the presented certificate, and the key digest appears in the TDX `report_data` and the NVIDIA evidence. |
-| **Hardware roots** (opt-in)                        | `+ CHUTES_VERIFY_QUOTE=true` and/or `CHUTES_VERIFY_GPU=true`, with the optional SDKs installed | The TDX quote chains to Intel's DCAP root with an acceptable TCB status, and NVIDIA NRAS attests the GPU evidence.                |
+### Transport scope and TLS
 
-Without the hardware flags, the certificate is _self-asserted_: you have proven
-key possession and internal consistency, not that the certificate belongs to
-genuine Chutes TDX hardware. Hardware roots close that last mile.
+Encrypted hosts are fixed, not user-scoped. The transport always encrypts and
+attests traffic to the two fixed Chutes hosts, `api.chutes.ai` and
+`llm.chutes.ai`. There is no endpoint or host override, and the encrypted set
+cannot change. TLS certificate verification is always on; there is no setting to
+relax it.
 
 ---
 
 ## 2. The trust chain
 
 ```
-                     sha256(nonce + e2e_pubkey) = digest
-                                   │
-        ┌──────────────────────────┼───────────────────────────┐
-        ▼                          ▼                           ▼
- RSA signature over          Intel TDX quote              NVIDIA GPU evidence
- attested_body               report_data[0:32]            nonce == digest
- (certificate in envelope)   (TD-REPORT offset 568)
-        │                          │                           │
-        │ (software)               │ (CHUTES_VERIFY_QUOTE)     │ (CHUTES_VERIFY_GPU)
-        ▼                          ▼                           ▼
- key possession            dcap-qvl DCAP chain          nv-attestation-sdk
- by cert holder            to Intel root,               REMOTE -> NRAS
-                           status OK/UpToDate           overall result == true
+                 sha256(nonce + e2e_pubkey) = digest
+                              │
+        evidence envelope: instance_id, certificate, signature, attested_body
+                              │
+                              │ RSA-PKCS1v15-SHA256 over attested_body
+                              ▼
+                  signed body is the source of truth
+                 (tdx_quote + nvtrust_evidence inside)
+                              │
+              ┌───────────────┴────────────────┐
+              ▼                                ▼
+       Intel TDX quote                  NVIDIA GPU evidence
+       DCAP via dcap-qvl                NRAS via nv-attestation-sdk
+       (mandatory)                      (mandatory)
+              │                                │
+              │ report_data[0:32]  == digest   │ nonce == digest,
+              │ report_data[32:64] ==          │ GPU count == measurement
+              │   sha256(cert_pubkey_DER)      │
+              ▼                                │
+   published Chutes measurement ◄──────────────┘
+   MRTD + RTMR0-3 exact match
+              │
+              ▼
+       trusted instance key
 ```
 
 - `e2e_pubkey` is the instance ML-KEM-768 key the transport encrypts to.
-- `nonce` is a fresh value from the instance's `/e2e/instances` pool.
-- `digest` is the 32-byte `sha256(nonce + e2e_pubkey)` (hex, lower-case),
+- `nonce` is a fresh value generated by the gate for each verification pass.
+- `digest` is the 32-byte `sha256(nonce + e2e_pubkey)` (lower-case hex),
   computed by `chutes_litellm/attestation.py:_digest_of`.
-- The same `digest` must appear in **three** places: inside the RSA-signed body,
-  in the TDX quote's `report_data`, and as the NVIDIA evidence nonce. Any
-  disagreement means the key is not the one the hardware measured.
+- The RSA-signed body is authoritative. Top-level `quote` / `gpu_evidence`
+  copies, if present, must agree with it (quotes are compared decoded; GPU
+  evidence is compared as canonical JSON).
+- The same `digest` must appear in `report_data[:32]` **and** as the NVIDIA NRAS
+  nonce; the certificate that signed the body must hash to `report_data[32:64]`;
+  and the TDX measurements must match an approved Chutes image. Any disagreement
+  means the key is not the one the hardware measured.
 
 ---
 
 ## 3. Endpoints and the evidence envelope
 
 The gate uses the same endpoints Chutes documents
-(`chutes-api/docs/tee-verification.md`) and the transport's discovery uses:
+(`chutes-api/docs/tee-verification.md`) and the transport's discovery uses, plus
+the public measurement list. The bases are fixed constants: the API/evidence and
+measurement calls always go to `https://api.chutes.ai`, and model listing always
+goes to `https://llm.chutes.ai`. There is no endpoint or host override.
 
 | Call                                        | Returns                                                                                                 |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `GET /v1/models`                            | `data[]` entries with `id` and `chute_id`                                                               |
 | `GET /e2e/instances/{chute_id}`             | `instances[]` with `instance_id`, `e2e_pubkey` (base64 ML-KEM-768), `nonces[]`; plus `nonce_expires_in` |
 | `GET /chutes/{chute_id}/evidence?nonce=...` | `{"evidence": [ ... ], "failed_instance_ids": [...]}`                                                   |
+| `GET /servers/tee/measurements`             | published Chutes measurement list (public, no auth)                                                     |
 
 ### Observed envelope (live capture)
 
@@ -92,11 +118,15 @@ A live `-TEE` chute produced one evidence blob per instance, keyed:
 | Key             | Type          | Notes                                                        |
 | --------------- | ------------- | ------------------------------------------------------------ |
 | `instance_id`   | string        | Matches an entry from `/e2e/instances`                       |
-| `quote`         | base64 string | Intel TDX quote; ~5247 bytes decoded                         |
-| `gpu_evidence`  | list          | `[{ "arch", "certificate", "evidence" }, …]`                 |
-| `certificate`   | base64 string | DER X.509 cert of the attestation proxy                      |
-| `signature`     | base64 string | RSA signature over `attested_body`                           |
-| `attested_body` | base64 string | Signed JSON; ~139 KB decoded, nests the quote + GPU evidence |
+| `quote`         | base64 string | Intel TDX quote; optional top-level copy of the signed value |
+| `gpu_evidence`  | list          | `[{ "arch", "certificate", "evidence" }, …]`; optional top-level copy |
+| `certificate`   | base64 string | DER X.509 cert of the attestation proxy (**required**)       |
+| `signature`     | base64 string | RSA signature over `attested_body` (**required**)            |
+| `attested_body` | base64 string | Signed JSON; nests the quote + GPU evidence (**required**)   |
+
+`certificate`, `signature` and `attested_body` are mandatory. The signature is
+RSA PKCS#1 v1.5 over SHA-256, verified with the certificate's public key. An
+envelope without them is rejected: an unsigned body is never accepted.
 
 Real-listing snapshots from the reference capture: 14 models under the test key
 (all `-TEE`); one large chute listed 5 instances but the evidence endpoint
@@ -109,107 +139,174 @@ requires every _listed_ instance to have verifying evidence.
 ## 4. The checks, and what each one proves
 
 `verify_evidence(evidence, e2e_pubkey, nonce=…)` returns a `VerificationResult`
-with a `checks` map. `chutes_litellm/attestation.py` implements them:
+whose `checks` map contains these names. The cryptographic implementation lives
+in `src/chutes_litellm/tee/`; `chutes_litellm/attestation.py` is the
+network/cache/gate layer.
 
-| Check                  | Implementation                                                                                            | Proves                                                                                          | Does **not** prove                                                       |
-| ---------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `key_possession`       | `_signature_ok`: RSA PKCS#1 v1.5 / SHA-256 verify of `signature` over `attested_body` using `certificate` | The envelope was produced by the holder of the certificate's private key                        | That the certificate is genuine hardware                                 |
-| `quote_report_data`    | `_quote_binds`: `_extract_report_data(quote)` contains the raw 32-byte digest                             | The TDX measurement (in the same quote) saw a report whose `report_data` binds this key + nonce | That the quote itself is valid — DCAP does that                          |
-| `gpu_nonce`            | `_gpu_binds`: the digest (hex or raw bytes) appears in some GPU evidence blob                             | The GPU evidence was produced for the same freshness nonce / key                                | That NVIDIA validated the GPU                                            |
-| `body_contains_digest` | substring search of the decoded body                                                                      | Diagnostic only; **never** a veto                                                               | —                                                                        |
-| `pubkey_bound`         | true if **any** binding source passed; false if a source is present but fails; `None` if no source exists | Aggregate "the key is bound somewhere verifiable"                                               | Which source; detailed per-check flags are preserved                     |
-| `dcap_quote`           | `_verify_tdx_quote` (only with `CHUTES_VERIFY_QUOTE=true`)                                                | Intel DCAP verified the quote and the TCB status is `OK`/`UpToDate`                             | —                                                                        |
-| `nv_gpu`               | `_verify_nvidia_gpu` (only with `CHUTES_VERIFY_GPU=true`)                                                 | NVIDIA NRAS attests every GPU in the evidence                                                   | That the GPU is running the expected workload (that is the policy layer) |
+| Check                  | Implementation                                                                                                     | Proves                                                                                                  | Does **not** prove                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `signature`            | `tee/evidence.py`: require `certificate` + `signature` + `attested_body`, then RSA PKCS#1 v1.5/SHA-256 verify     | The envelope was produced by the holder of the certificate's private key, and the signed body is authentic | That the certificate is genuine hardware                                  |
+| `quote_report_data`    | `tee/verifier.py`: `report_data[:32] == bytes.fromhex(digest)` (exact, no substring search)                        | The TDX quote binds `sha256(nonce + e2e_pubkey)` for this instance                                      | That the quote chains to Intel (DCAP does that)                           |
+| `certificate_binding`  | `tee/verifier.py`: `report_data[32:64] == bytes.fromhex(sha256(cert_pubkey_DER))`                                  | The certificate that signed the evidence is the one attested by the quote                               | That the certificate's subject is Chutes                                  |
+| `measurement`          | `tee/measurements.py`: exact MRTD + RTMR0-3 match against the published measurement list                           | The TDX image and runtime state are a Chutes-approved build                                             | Which chute is served (that comes from the instance/key binding)           |
+| `dcap_quote`           | `tee/quote.py`: mandatory `dcap-qvl` verification; `UpToDate`, no advisories, debug bit off, cross-checked report  | The TDX quote chains to Intel's DCAP root with an acceptable TCB                                        | —                                                                         |
+| `nv_gpu`               | `tee/verifier.py`: mandatory NVIDIA NRAS verification plus `len(evidence) == measurement.gpu_count`                 | NVIDIA NRAS attests every GPU, in the quantity the approved measurement expects                        | That the GPU is running the expected workload (that is the policy layer)  |
+
+The signed body is the source of truth for the quote and GPU evidence. If
+top-level copies are present they must agree; a mismatch fails closed.
 
 ### Fail-closed rules
 
 From `verify_evidence`:
 
-- If `key_possession` is present but **false** → fail.
-- If a present binding source (`quote_report_data`, `gpu_nonce`) is **false** → fail.
-- If **no** binding evidence exists at all → fail (a dishonest relay that
-  forwards nothing must not be treated as "nothing to check").
-- Hardware verifiers **raise** rather than return false; the caller records the
-  per-instance reason.
+- Missing `certificate`, `signature` or `attested_body` → fail; unsigned bodies
+  are rejected.
+- Signature verification failure → fail.
+- `report_data[:32] != digest` → fail. This also rejects legacy Chutes < 0.6.0
+  evidence, which binds a raw nonce instead of `sha256(nonce + e2e_pubkey)`.
+- `report_data[32:64] != sha256(cert_pubkey_DER)` → fail. A self-signed
+  certificate that is not the one attested by the quote cannot pass.
+- No published measurement source, or no matching MRTD/RTMR set → fail.
+- Ambiguous matches whose GPU expectations disagree → fail closed.
+- Any hardware verifier exception or missing required SDK import → fail.
+- Every failure raises `AttestationError`; there is no "partially verified"
+  result.
 
-`body_contains_digest` is informational. The signed `attested_body` is trusted
-because of `key_possession`, so if the digest only appears there, the checks
-still bind.
-
----
-
-## 5. TDX `report_data` extraction
-
-`_extract_report_data(tdx_quote)` reads the 64-byte `report_data` at a fixed
-offset:
-
-```
-TD-REPORT starts at byte 48 of the DCAP quote.
-report_data is the last 64 bytes of the 584-byte TD-REPORT:
-    offset = 48 + 584 - 64 = 568
-    set(range(0, 64)) bytes, quoted to the end.
-```
-
-This is a deliberate **heuristic** mirroring the public Chutes layout: the code
-does not link an SGX/TDX parser for the software-binding path. If the blob is
-too short (< 640 bytes) or all-zero, `_extract_report_data` returns `None`, and
-`_quote_binds` returns `None` (not checked) rather than a false failure. If Intel
-changes the binary format, the software check stops seeing the binding — and the
-verdict fails closed only if there is no other binding source. The hardware path
-(`dcap-qvl`) independently re-parses the quote when
-`CHUTES_VERIFY_QUOTE=true`, so the fixed offset is not trusted for the root of
-trust.
-
-`_quote_binds` searches for the raw 32 digest bytes; because `sha256` output is
-32 bytes and `report_data` is 64, the digest sits in `report_data[:64]`.
+All digest/certificate comparisons are exact 32-byte comparisons. No substring
+search is used anywhere.
 
 ---
 
-## 6. NVIDIA GPU evidence
+## 5. TDX `report_data` extraction and binding
+
+`tee/quote.py:TdxQuote.from_bytes` parses the fixed TDX quote layout (a quote is
+at least 632 bytes: a 48-byte header plus a 584-byte TD-REPORT):
+
+```
+header:  version (u16), att_key_type (u16), tee_type (u32)
+checks:  version in (4, 5), tee_type == 0x81 (TDX), att_key_type in (2, 3)
+TD-REPORT at offset 48:
+    td_attributes = td[120:128]
+    mrtd          = td[136:184]
+    rtmr0         = td[328:376]
+    rtmr1         = td[376:424]
+    rtmr2         = td[424:472]
+    rtmr3         = td[472:520]
+    report_data   = td[520:584]   # quote offset 568
+```
+
+`report_data` is 64 bytes and is bound in two exact halves:
+
+- `report_data[:32] == sha256(nonce + e2e_pubkey)` — freshness and key binding.
+  The raw digest bytes are compared, not searched for as a substring.
+- `report_data[32:64] == sha256(cert_pubkey_DER)` — certificate binding, where
+  the DER form is SubjectPublicKeyInfo.
+
+DCAP verifies the same raw quote bytes, and the parser's MRTD/RTMR values are
+cross-checked against the DCAP `TD10` report (`parse_and_crosscheck`), so the
+offsets above are not trusted on their own.
+
+---
+
+## 6. Published measurement policy
+
+A structurally valid quote is not enough: it must match a Chutes-approved VM
+version and hardware variant. `tee/measurements.py` resolves the policy list and
+matches on **exact MRTD + RTMR0-3** (the runtime RTMR set used for chute
+evidence).
+
+Sources:
+
+1. **Public endpoint (default):** `GET https://api.chutes.ai/servers/tee/measurements`.
+2. **Local YAML override:** if `CHUTES_TEE_MEASUREMENTS_FILE` is set, that file is
+   the **sole** source; the endpoint is not consulted and entries are not merged.
+
+The list is cached for `CHUTES_TEE_MEASUREMENTS_TTL` seconds (default `3600`).
+A transient endpoint failure serves the last-known-good list; if no list has ever
+been loaded, verification fails closed. A local file that is unreadable, empty,
+or malformed also fails closed.
+
+Local YAML uses the Chutes measurement schema:
+
+```yaml
+measurements:
+  - version: "0.6.1"
+    mrtd: "<96 hex chars>"
+    rtmr1: "<96 hex chars>"
+    rtmr2: "<96 hex chars>"
+    runtime_rtmr3: "<96 hex chars>"
+    hardware:
+      - name: "HOPPER"
+        rtmr0: "<96 hex chars>"
+        expected_gpus: ["H100"]
+        gpu_count: 1
+        fingerprint: "<optional 64 hex chars>"
+```
+
+Values are normalised to upper-case hex and validated (96 characters for
+MRTD/RTMRs). If more than one hardware entry matches the quote and they disagree
+on expected GPUs or GPU count, the verification fails closed as ambiguous. The
+matched entry's `gpu_count` is what NRAS evidence is checked against.
+
+---
+
+## 7. NVIDIA GPU evidence
 
 Each GPU blob is `{ "arch", "certificate", "evidence" }`. The NVIDIA SDK's
-remote verifier (`nv_attestation_sdk/gpu/attest_gpu_remote.py:build_payload`)
-requires exactly these fields and a **single consistent `arch`** across the list,
-so `_normalize_gpu_evidence`:
+remote verifier requires exactly these fields and a **single consistent `arch`**
+across the list, so `_normalize_gpu_evidence`:
 
-- flattens candidates discovered by `_collect_gpu` (top-level `gpu_evidence`,
-  JSON strings, and the signed body's `evidence.gpu_evidence` /
-  `nvtrust_evidence`),
-- drops anything missing/empty `arch`, `certificate` or `evidence` (this is why
-  the test mock's `{nonce, gpu_uuid}` shape yields "no usable GPU evidence" and
-  fails closed),
+- reads the GPU evidence from the signed body (`evidence.nvtrust_evidence`,
+  with `gpu_evidence`/`gpu_evidences` variants also accepted),
+- drops anything missing/empty `arch`, `certificate` or `evidence`,
 - JSON-encodes non-string certificate/evidence values,
 - de-duplicates identical entries, and
 - rejects a mixed-architecture list.
 
-`_verify_nvidia_gpu` then serialises access to the SDK's process-wide singleton
+`_verify_nvidia_gpu` then checks `len(normalized) == measurement.gpu_count`,
+serialises access to the SDK's process-wide singleton
 (`Attestation().reset()` → `add_verifier(Devices.GPU, Environment.REMOTE, url, "")`
-→ `set_nonce(digest)` → `attest(normalized)`). `set_nonce(digest)` is what makes
-NRAS check the freshness/anti-substitution binding. Every GPU must pass; the SDK
-returns a single overall verdict, so failures report the arch/count and the NRAS
-URL used.
+→ `set_nonce(digest)` → `attest(normalized)`), and requires the overall verdict.
+`set_nonce(digest)` is what makes NRAS check the freshness/anti-substitution
+binding. Every GPU must pass; failures report the arch/count and the NRAS URL
+used. GPU verification is mandatory and has no disable switch.
+
+The measurement's `expected_gpus` list is parsed and used to detect conflicting
+matches (ambiguity fails closed), but the verifier enforces the **GPU count**
+and the **NRAS verdict**, not an exact GPU model string. In other words, a
+measurement can require "1 GPU" without the verifier proving that the GPU model
+is exactly the one named in `expected_gpus`.
 
 ---
 
-## 7. Fail-closed semantics
+## 8. Fail-closed semantics
 
 `verify_chute` (the gate) is **strict**: it fetches `/e2e/instances`, then
 `/chutes/{id}/evidence`, and requires **every listed instance to verify**. This
 matters because the transport picks an instance itself; trusting a
 partially-verified chute would let a request land on the unverified instance.
-(The [instance filter](#8-binding-attested-instances-to-selection) removes even
+(The [instance filter](#9-binding-attested-instances-to-selection) removes even
 that gap.)
 
-It returns the list of verified `instance_id`s, or raises `AttestationError`
-with an actionable multi-line message:
+On success it returns a `{instance_id: e2e_pubkey}` mapping. On failure it raises
+`AttestationError` with an actionable multi-line message:
 
 ```
 attestation failed for chute <id> (model '<model>') — request refused.
   instances listed: N, evidence blobs: M, failed: F, unmatched: U
   per-instance reason(s):
-    - <instance>: failed checks: quote_report_data  [signature=ok, tdx_binding=FAIL, gpu_binding=ok, ...]
-  api_base=…  models_base=…
+    - <instance>: TDX report_data[0:32] does not bind sha256(nonce + e2e_pubkey); refusing legacy/raw-nonce evidence
+  api_base=https://api.chutes.ai  models_base=https://llm.chutes.ai
 ```
+
+Other representative reasons:
+
+- `TDX report_data[32:64] does not bind the certificate public key; the evidence certificate is not the one attested by the quote`
+- `TDX quote does not match any published Chutes measurement (MRTD=…, RTMR0=…)`
+- `evidence has no 'signature'; refusing unsigned evidence`
+- `top-level quote differs from the signed-body quote`
+- `TDX quote is not valid: status='OutOfDate'`
+- `GPU evidence count does not match the attested measurement: got 2, expected 1`
 
 In the proxy the error is wrapped in a `litellm.APIError` with HTTP **503**, so
 the caller sees a structured body explaining _why_, not an opaque 500. Because
@@ -217,20 +314,21 @@ the check runs in the httpx transport before the request leaves the process, a
 failed gate means **no encrypted request is ever sent** (the offline tests assert
 `/e2e/invoke` was not called).
 
-Missing optional SDKs also fail closed: `verify_quote`/`verify_gpu` raise
-`AttestationError("… requires the optional 'dcap-qvl'/'nv-attestation-sdk'
-package")` when the package is not importable.
+The hardware SDKs (`dcap-qvl`, `nv-attestation-sdk`) are base dependencies. If an
+import somehow fails, verification raises `AttestationError` rather than silently
+downgrading.
 
 ---
 
-## 8. Binding attested instances to selection
+## 9. Binding attested instances to selection
 
 Strictness at the gate is necessary but not quite sufficient: the gate fetches
 `/e2e/instances` itself, while the E2EE transport has its **own** discovery
 cache. A race (or a malicious server returning different instance sets to the
-two calls) could let the transport select an instance the gate never saw.
+two calls) could let the transport select an instance the gate never saw, or
+substitute a different key for a verified instance id (TOCTOU).
 
-The fork adds an optional `instance_filter` hook to `DiscoveryManager`
+The fork adds an `instance_filter` hook to `DiscoveryManager`
 (`chutes-e2ee-transport/src/chutes_e2ee/discovery.py`):
 
 ```python
@@ -242,78 +340,87 @@ DiscoveryManager(..., instance_filter=lambda chute_id, instances: allowed_instan
 - It may raise to refuse the chute.
 - If it returns an empty set while instances were listed, the chute is refused
   (no silent fallback to an unapproved instance).
-- When the gate is off, the proxy passes `None` — zero overhead.
+- The proxy always installs it; there is no opt-out.
 
 The proxy wires it in `src/chutes_litellm/e2ee_litellm.py` and
-`src/chutes_litellm/custom_provider.py`: the filter calls `verify_chute(chute_id)`
-(cheaply cached after the pre-send `_maybe_verify`) and intersects the
-transport's instances with the verified ids. The pre-send `_maybe_verify` is kept
-as an explicit, cache-warm check so the failure message is emitted before any
-discovery work; the filter is what actually constrains selection.
+`src/chutes_litellm/custom_provider.py`. The filter calls `verify_chute(chute_id)`
+(cheaply cached after the pre-send `_verify_request`) and keeps an instance only
+when **both** its `instance_id` and its `e2e_pubkey` match the verified mapping.
+A same-id/different-key substitution is therefore dropped before any
+`/e2e/invoke`. The pre-send `_verify_request` is kept as an explicit, cache-warm
+check so the failure message is emitted before any discovery work; the filter is
+what actually constrains selection.
 
 ---
 
-## 9. Caching and performance
+## 10. Caching and performance
 
-Attestation is **off by default** and costs nothing unless
-`CHUTES_VERIFY_ATTESTATION=true`. When on, steady-state requests do a dict
-lookup, not a network round trip:
+Attestation is always on. Steady-state requests do a dict lookup, not a network
+round trip:
 
-| Mechanism          | Env var (default)                          | Notes                                                                                                                                                                                         |
-| ------------------ | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Positive cache     | `CHUTES_ATTESTATION_TTL` (300 s)           | Verified instance ids per `(chute_id, verify_quote, verify_gpu, check_signature)`. The mode is part of the key, so a no-quote verdict can never satisfy a `CHUTES_VERIFY_QUOTE=true` request. |
-| Negative cache     | `CHUTES_ATTESTATION_FAILURE_TTL` (30 s)    | A failing chute fails fast instead of re-fetching on every request (self-inflicted DoS protection).                                                                                           |
-| Model→chute map    | `CHUTES_ATTESTATION_MODEL_MAP_TTL` (300 s) | Avoids a `/v1/models` call per request.                                                                                                                                                       |
-| Single-flight      | —                                          | Concurrent cold-cache callers are coalesced into one evidence fetch (a `threading.Event` per key).                                                                                            |
-| Pooled HTTP client | —                                          | One shared `httpx.Client` keeps TLS sessions to `api.chutes.ai` alive.                                                                                                                        |
+| Mechanism             | Env var (default)                          | Notes                                                                                                                                       |
+| --------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Positive cache        | `CHUTES_ATTESTATION_TTL` (300 s)           | Verified `{instance_id: e2e_pubkey}` mapping per `chute_id`. The same mapping is what the transport filter pins.                           |
+| Negative cache        | `CHUTES_ATTESTATION_FAILURE_TTL` (30 s)    | A failing chute fails fast instead of re-fetching on every request (self-inflicted DoS protection).                                         |
+| Model→chute map       | `CHUTES_ATTESTATION_MODEL_MAP_TTL` (300 s) | Avoids a `/v1/models` call per request.                                                                                                     |
+| Measurement list      | `CHUTES_TEE_MEASUREMENTS_TTL` (3600 s)     | Caches the public list or local file; last-known-good is served on a transient endpoint failure.                                            |
+| Single-flight         | —                                          | Concurrent cold-cache callers are coalesced into one evidence fetch (a `threading.Event` per key).                                          |
+| Pooled HTTP client    | —                                          | One shared `httpx.Client` keeps TLS sessions to `api.chutes.ai` alive.                                                                      |
 
-Measured on the reference host: a cold `verify_chute` (network-bound evidence
-fetch + parse) ≈ **8 s**; warm ≈ **0 ms**; the GPU binding scan ≈ **0 ms** on
-the captured evidence. `attested_body` (~139 KB) is base64-decoded and parsed
-**once** per instance per verification and reused for every binding check.
+A cold `verify_chute` is dominated by the network (model lookup, instances,
+evidence, measurement fetch). Warm verification is a local dict lookup. The
+decoded signed body is parsed once per instance per verification and reused for
+every binding check.
 
 ---
 
-## 10. Environment variables
+## 11. Environment variables
 
-| Variable                           | Default                                               | Meaning                                                           |
-| ---------------------------------- | ----------------------------------------------------- | ----------------------------------------------------------------- |
-| `CHUTES_VERIFY_ATTESTATION`        | `false`                                               | Master switch for the fail-closed gate                            |
-| `CHUTES_VERIFY_QUOTE`              | `false`                                               | Require Intel DCAP TDX-quote verification (needs `dcap-qvl`)      |
-| `CHUTES_VERIFY_GPU`                | `false`                                               | Require NVIDIA NRAS GPU verification (needs `nv-attestation-sdk`) |
-| `CHUTES_ATTESTATION_TTL`           | `300`                                                 | Positive verdict TTL (seconds)                                    |
-| `CHUTES_ATTESTATION_FAILURE_TTL`   | `30`                                                  | Negative verdict TTL (seconds)                                    |
-| `CHUTES_ATTESTATION_MODEL_MAP_TTL` | `300`                                                 | Model→chute id cache TTL (seconds)                                |
-| `CHUTES_DCAP_PCCS_URL`             | dcap-qvl default (Phala `https://pccs.phala.network`) | Collateral/PCCS base for DCAP                                     |
-| `CHUTES_NVIDIA_NRAS_URL`           | `https://nras.attestation.nvidia.com/v3/attest/gpu`   | NVIDIA Remote Attestation Service endpoint                        |
-| `CHUTES_E2EE_API_BASE`             | `https://api.chutes.ai`                               | E2EE/attestation API base                                         |
-| `CHUTES_E2EE_MODELS_BASE`          | `https://llm.chutes.ai`                               | Model-listing base                                                |
+| Variable                           | Default                                               | Meaning                                                                 |
+| ---------------------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------- |
+| `CHUTES_TEE_MEASUREMENTS_FILE`     | unset                                                 | Local YAML measurement policy (Chutes schema); sole source when set.    |
+| `CHUTES_TEE_MEASUREMENTS_TTL`      | `3600`                                                | Published measurement cache TTL (seconds).                              |
+| `CHUTES_ATTESTATION_TTL`           | `300`                                                 | Positive verdict TTL (seconds).                                         |
+| `CHUTES_ATTESTATION_FAILURE_TTL`   | `30`                                                  | Negative verdict TTL (seconds).                                         |
+| `CHUTES_ATTESTATION_MODEL_MAP_TTL` | `300`                                                 | Model→chute id cache TTL (seconds).                                     |
+| `CHUTES_DCAP_PCCS_URL`             | dcap-qvl default (Phala `https://pccs.phala.network`) | Collateral/PCCS base for DCAP.                                          |
+| `CHUTES_NVIDIA_NRAS_URL`           | `https://nras.attestation.nvidia.com/v3/attest/gpu`   | NVIDIA Remote Attestation Service endpoint.                             |
+
+The Chutes API/evidence base (`https://api.chutes.ai`) and the model-listing base
+(`https://llm.chutes.ai`) are **fixed constants**, not environment variables.
+There is no base-URL or host override.
 
 The NVIDIA SDK additionally honours its own `NVIDIA_ATTESTATION_SERVICE_KEY`,
 `NV_NRAS_GPU_URL`, `NV_OCSP_URL`, `NV_RIM_URL` and `NV_ALLOW_HOLD_CERT`; a
 non-empty `CHUTES_NVIDIA_NRAS_URL` is passed explicitly and wins.
 
+Nix service users tune the same policy through `services.litellm.teeMeasurementsFile`,
+`teeMeasurementsTtl`, the attestation TTLs (`attestationTtl`,
+`attestationFailureTtl`, `attestationModelMapTtl`), `dcapPccsUrl`,
+`nvidiaNrasUrl`, `customProvider` and the logging options. The Chutes endpoints
+are fixed and are not Nix options. There is no Nix option that disables
+attestation, DCAP, measurement matching, GPU/NRAS verification or TLS
+verification; those are unconditional.
+
 ---
 
-## 11. Manual verification (CLI)
+## 12. Manual verification (CLI)
 
-Install the optional SDKs for hardware roots:
+The hardware SDKs are part of the base install. `uv sync --extra attestation`
+still works as a backward-compatible alias.
 
 ```sh
-uv sync --extra attestation
+uv sync --extra attestation     # alias; SDKs are already base deps
 ```
 
-Software binding for a model (default bases):
+The CLI **always** verifies the signed body, the TDX quote (DCAP), the
+published measurement and the NVIDIA NRAS GPU evidence:
 
 ```sh
 CHUTES_API_KEY=cpk_... chutes-verify-attestation --model "Qwen/Qwen3.5-397B-A17B-TEE"
-```
 
-Full hardware roots (needs outbound Intel PCCS + NVIDIA NRAS):
-
-```sh
-CHUTES_API_KEY=cpk_... chutes-verify-attestation \
-  --chute <uuid> --verify-quote --verify-gpu --details
+# per-instance checks, DCAP status and GPU verdicts
+CHUTES_API_KEY=cpk_... chutes-verify-attestation --chute <uuid> --details
 ```
 
 `--details` prints, per instance, the check map, the DCAP TCB status and the
@@ -321,29 +428,97 @@ NVIDIA arch/GPU count, e.g.:
 
 ```
 chute <uuid> (model '…-TEE'): instances listed=5, evidence blobs=16, unmatched=11
-  - <instance>: VERIFIED [signature=ok, tdx_binding=ok, gpu_binding=ok, body_digest=ok, pubkey_bound=ok | dcap_status=OK | gpu=1xHOPPER]
+  - <instance>: VERIFIED [signature=ok, tdx_binding=ok, cert_binding=ok, measurement=ok, dcap_quote=ok, nv_gpu=ok | dcap_status=UpToDate | gpu=1xHOPPER]
 OK: 5 instance(s) passed TEE/GPU attestation
 ```
 
-The default (non-`--details`) output is unchanged, so existing scripts keep
-working. See [`scripts/verify_attestation.py`](../scripts/verify_attestation.py)
-and [`src/chutes_litellm/verify.py`](../src/chutes_litellm/verify.py).
-
-> **Software binding vs hardware roots.** Without `--verify-quote` /
-> `--verify-gpu` (or without the SDKs), the CLI proves the signature over the
-> evidence and the internal `sha256(nonce+pubkey)` binding. It does **not**
-> validate the Intel/NVIDIA roots. When a hardware flag is set without the SDK
-> installed, the command fails closed.
+The default (non-`--details`) output lists the verified instance ids. See
+[`scripts/verify_attestation.py`](../scripts/verify_attestation.py) and
+[`src/chutes_litellm/verify.py`](../src/chutes_litellm/verify.py).
 
 ---
 
-## 12. Sequence diagram
+## 13. Compatibility
+
+The mandatory chain intentionally changes what older deployments can do. All of
+these cases **fail closed** rather than falling back to a weaker verdict:
+
+| Case | Result |
+| ---- | ------ |
+| Chutes < 0.6.0 evidence (raw nonce, no `sha256(nonce + e2e_pubkey)` in `report_data[:32]`) | Rejected |
+| Attestation proxy < 0.2.0 (no `signature` / `attested_body`) | Rejected as unsigned |
+| No measurement source reachable and no last-known-good/local file | Rejected |
+| Quote matches no published measurement, or ambiguous matches conflict | Rejected |
+| `dcap-qvl` unavailable, or `nv-attestation-sdk` unavailable | Rejected |
+
+Operators who need a deterministic policy can pin a local
+`tee_measurements.yaml` through `CHUTES_TEE_MEASUREMENTS_FILE` (or the Nix
+`teeMeasurementsFile` option). There is no way to skip the chain: the old
+attestation, GPU and TLS disable controls were removed, not merely defaulted to
+"on".
+
+---
+
+## 14. Model weights are not attested
+
+This section describes a real limitation of the current protocol. It is not a
+configuration problem, and no proxy setting can close it.
+
+### What the attestation does cover
+
+The TDX quote covers the VM firmware, boot chain and rootfs (`MRTD` and
+`RTMR0-3`) and binds the E2E/TLS key material through `report_data`. NVIDIA
+NRAS independently attests the GPU hardware. Together these prove **which VM
+image and which GPU** are serving the request.
+
+### What it does not cover
+
+None of that binds a model id, a model revision, or a weight digest:
+
+- Chutes downloads weights at runtime into `/var/snap/cache/<chute_id>`, which is
+  outside the measured rootfs path list and is populated **after** the RTMR3
+  initramfs measurement.
+- `runtime_rtmr3` is a per-VM-image value shared by every chute running on that
+  image. It is not a per-model measurement.
+- The evidence envelope and its signed body contain only the TDX quote and the
+  NVIDIA evidence. The measurement list has no model field.
+- Guest-side `verify_cache` and watchtower weight checks are control-plane or
+  heuristic checks; their results are not attested.
+- Even weights baked into a chute container image are not in the VM
+  measurements. Workload code is verified separately at admission, and its
+  digest is not in the evidence.
+
+**Verdict:** with the current protocol, model weights cannot be verified by this
+proxy (or by any client using the same evidence). A passing attestation means
+"approved TDX image + approved GPU hardware with a key bound to that evidence",
+not "this exact model revision is loaded".
+
+### What would be required
+
+Closing this gap needs protocol and platform work, not a client flag:
+
+- a canonical weight manifest/digest (model id + revision + per-file or Merkle
+  root) published by the model owner;
+- measured load-time hashing of the weights inside the guest, with the result
+  placed in attested state rather than a control-plane database;
+- hardware binding of that digest: a `report_data` v2 field, or a
+  domain-separated RTMR3 extend that cannot be confused with the initramfs
+  measurement;
+- model fields in the signed body, plus per-model signed measurements;
+- client-side matching and inclusion of the digest in the attestation cache key;
+- `fs-verity`/`dm-verity` (or equivalent) on the weight store to close the
+  load-time TOCTOU gap between hashing and use.
+
+---
+
+## 15. Sequence diagram
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant P as Proxy gate
     participant A as api.chutes.ai
+    participant M as Measurement list
     participant D as Intel DCAP (PCCS)
     participant N as NVIDIA NRAS
 
@@ -353,27 +528,28 @@ sequenceDiagram
     A-->>P: instances [instance_id, e2e_pubkey, nonces, nonce_expires_in]
     P->>P: nonce = random 32 bytes; digest = sha256(nonce + e2e_pubkey)
     P->>A: GET /chutes/{chute_id}/evidence?nonce=...
-    A-->>P: evidence[] (quote, gpu_evidence, certificate, signature, attested_body)
+    A-->>P: evidence[] (certificate, signature, attested_body, mirrors)
 
     loop each evidence blob
-        P->>P: key_possession = RSA(signature, attested_body, cert)
-        P->>P: quote_report_data = digest bytes in TDX report_data
-        P->>P: gpu_nonce = digest in NVIDIA evidence
-        opt CHUTES_VERIFY_QUOTE
-            P->>D: get_collateral_and_verify(quote)
-            D-->>P: report.status == OK/UpToDate
-        end
-        opt CHUTES_VERIFY_GPU
-            P->>N: POST attest/GPU (nonce=digest, {arch,certificate,evidence})
-            N-->>P: overall attestation result == true
-        end
+        P->>P: signature = RSA-PKCS1v15-SHA256(attested_body, cert)
+        P->>P: signed body is authoritative; top-level mirrors must match
+        P->>D: get_collateral_and_verify(quote)   (mandatory)
+        D-->>P: status == UpToDate, no advisories, debug off
+        P->>P: report_data[:32] == digest (exact)
+        P->>P: report_data[32:64] == sha256(cert_pubkey_DER) (exact)
+        P->>M: GET /servers/tee/measurements (TTL-cached)
+        M-->>P: measurements
+        P->>P: exact MRTD + RTMR0-3 match
+        P->>N: POST attest/GPU (nonce=digest, {arch,certificate,evidence})
+        N-->>P: overall attestation result == true
+        P->>P: GPU count == matched measurement.gpu_count
     end
 
     alt every listed instance verified
-        P->>P: cache verified ids for TTL
-        P->>P: instance_filter keeps only verified ids
+        P->>P: cache {instance_id: e2e_pubkey} for TTL
+        P->>P: instance_filter keeps only verified id + pubkey
         Note over P: encrypted request proceeds (see e2ee-encryption.md)
-    else any failure / no binding / missing SDK
+    else any failure / unsigned / legacy / measurement mismatch
         P-->>P: raise AttestationError -> litellm.APIError 503
         Note over P: request is NOT sent (fail closed)
     end

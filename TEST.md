@@ -26,12 +26,14 @@ CHUTES_LIVE_TEE=1 CHUTES_API_KEY=cpk_... \
 
 | Path | Kind | What it covers |
 | ---- | ---- | -------------- |
-| `tests/conftest.py` | fixture | Points the transport at the mock server; resets clients/caches between tests. Yields to real env when `CHUTES_LIVE_TEE=1`. |
-| `tests/mock_chutes_server.py` | helper | Real HTTP server implementing the Chutes E2EE control plane (discovery, `/e2e/invoke`, encrypted SSE replies, evidence). Holds the instance private key. |
+| `tests/conftest.py` | fixture | Points the transport at the mock server; resets clients/caches between tests. Provides `TeeFakes`, which fakes only the three offline boundaries (DCAP, the measurement source and the NVIDIA SDK/NRAS call). Production calls all three for real; NRAS is faked at the SDK boundary, not bypassed. Yields to real env when `CHUTES_LIVE_TEE=1`. |
+| `tests/mock_chutes_server.py` | helper | Real HTTP server implementing the Chutes E2EE control plane (discovery, `/e2e/invoke`, encrypted SSE replies, evidence). Holds the instance private key and builds production-shaped signed evidence with a valid TDX quote, fixed measurements and a bound certificate. |
 | `tests/test_custom_provider.py` | offline | The `chutes_e2ee` `CustomLLM` provider: encryption proof, wire model id, usage, tool calls, reasoning, error mapping. |
-| `tests/test_attestation.py` | offline | Attestation evidence parsing/verification, tamper/fail-closed behaviour, strict all-instances gating, cache-mode/negative-cache/single-flight, transport wiring of `CHUTES_VERIFY_QUOTE`/`_GPU`, optional-hardware SDK gating, and the DCAP/NVIDIA verifiers with **fake SDKs** (evidence normalisation, TCB status, NRAS URL, fail-closed). |
-| `tests/test_e2ee_litellm.py` | offline | The host-scoped transport swap (`e2ee_litellm.install()`) and the attested-instance selection filter (only verified instances survive; failures raise before any invoke). |
-| `tests/test_live_attestation.py` | live | Real discovery + evidence binding/key-possession for a live `-TEE` chute; optional real Intel DCAP + NVIDIA NRAS hardware-root verification (skips when the SDKs are absent or PCCS/NRAS are unreachable). |
+| `tests/test_attestation.py` | offline | The always-on attestation pipeline: signed-body signature, exact `report_data[:32]`/`report_data[32:64]` bindings, certificate binding, mandatory DCAP, exact measurement matching, mandatory NRAS with GPU-count equality, unsigned/legacy rejection, tamper/fail-closed behaviour, strict all-instances gating, `chute_id` cache/negative-cache/single-flight, and the NVIDIA verifier with a fake SDK (evidence normalisation, GPU-count check, NRAS URL, fail-closed). Includes the regression test that the removed env toggles are inert. |
+| `tests/test_tee_quote.py` | offline | TDX quote parser and DCAP wrapper: header/length validation, MRTD/RTMR/report_data extraction, parsed-vs-DCAP cross-check, TCB status/debug/advisory policy, and the TDX-module TCB fallback, with fake DCAP input. |
+| `tests/test_tee_measurements.py` | offline | Measurement policy: public-endpoint and local-YAML parsing, TTL/last-known-good cache behaviour, exact MRTD + RTMR0-3 matching, ambiguity and unavailable-source fail-closed cases. |
+| `tests/test_e2ee_litellm.py` | offline | The host-scoped transport swap (`e2ee_litellm.install()`), the always-installed attested-instance selection filter, and fixed host scoping (only the two fixed Chutes hosts, not overridable). Includes the TOCTOU regression: a same-id/different-`e2e_pubkey` substitution is refused before `/e2e/invoke`. |
+| `tests/test_live_attestation.py` | live | Real discovery + full evidence verification against a live `-TEE` chute: mandatory Intel DCAP, exact key/certificate bindings, a non-empty published measurement list, and mandatory NVIDIA NRAS GPU verification with GPU-count equality. Skips when the network or PCCS/NRAS is unreachable; there is no skip-by-disabling path. |
 | `tests/test_live_proxy.py` | live | Real custom-provider invokes, thinking visibility, a real in-process proxy reached over HTTP, and a gated request whose invoked `X-Instance-Id` is asserted to be in the verified set. |
 
 The fork adds hermetic hook tests at
@@ -40,10 +42,10 @@ with `pytest chutes-e2ee-transport/tests/test_discovery_filter.py`).
 
 ## Offline suite
 
-No API key needed. `tests/conftest.py` starts a local mock and points
-`CHUTES_E2EE_API_BASE` / `CHUTES_E2EE_MODELS_BASE` at it. The mock performs
-**real** ML-KEM-768 + HKDF + ChaCha20-Poly1305 crypto, so a passing test proves
-the request was genuinely end-to-end encrypted (the mock can only read it
+No API key needed. `tests/conftest.py` starts a local mock and monkeypatches the
+`chutes_litellm.endpoints.API_BASE` / `MODELS_BASE` constants at it. The mock
+performs **real** ML-KEM-768 + HKDF + ChaCha20-Poly1305 crypto, so a passing test
+proves the request was genuinely end-to-end encrypted (the mock can only read it
 because it holds the instance private key).
 
 ```sh
@@ -51,7 +53,8 @@ uv run pytest tests/ -q                 # whole offline suite
 uv run pytest tests/test_custom_provider.py -v
 ```
 
-Optional: `CHUTES_E2EE_VERIFY_SSL=false` is forced for the mock (plain HTTP).
+The mock is plain HTTP on localhost. TLS certificate verification stays on for
+every real HTTPS request and is not configurable, so the tests never disable it.
 On NixOS, if importing `litellm` fails with a `libstdc++.so.6` error, run the
 venv Python with the compiler's runtime on the path:
 
@@ -77,13 +80,19 @@ LD_LIBRARY_PATH="$(dirname "$(gcc -print-file-name=libstdc++.so)")" \
 
 `test_live_attestation.py`
 
-1. Resolves the model's chute, lists its E2EE instances, fetches fresh evidence
-   for a random nonce, and verifies key-possession + key-binding.
-2. `test_live_verify_chute_hardware_roots` — with `dcap-qvl` /
-   `nv-attestation-sdk` installed (`uv sync --extra attestation`), runs the full
-   Intel DCAP + NVIDIA NRAS verification.  It skips (not fails) when the SDKs
-   are missing or the PCCS/NRAS endpoints are unreachable; a genuine
-   attestation failure still fails the test.
+1. `test_live_measurements_endpoint_is_non_empty` — fetches the real published
+   measurement list and asserts it is non-empty.
+2. `test_live_verify_chute` — resolves the model's chute, lists its E2EE
+   instances, fetches fresh evidence for a random nonce, and runs the full
+   mandatory chain: signed-body signature, Intel DCAP, exact `report_data` key +
+   certificate bindings, measurement matching, and NVIDIA NRAS GPU verification
+   with GPU-count equality.
+3. `test_live_verify_chute_hardware_roots` — re-runs the same live chute against
+   the real DCAP verifier, the real published measurement list and real NRAS.
+   The module skips (not fails) when the measurement endpoint, PCCS or NRAS is
+   unreachable; a genuine attestation failure still fails the test. There is no
+   disable switch and no GPU-only skip path: every live verification runs the
+   whole chain.
 
 `test_live_proxy.py`
 
@@ -118,11 +127,24 @@ dropped (`UnsupportedParamsError`). In the generated proxy config this is
 
 ## Fixtures and isolation
 
-- `mock_server` (function scope) starts a fresh mock and points the env at it.
+- `mock_server` (function scope) starts a fresh mock and monkeypatches the
+  endpoint constants at it.
+- `tee_fakes` replaces only the three offline boundaries:
+  `tee.quote._dcap_verify`, the measurement source, and the NVIDIA SDK's
+  `Attestation` client. Production always calls real DCAP, the real measurement
+  endpoint and real NRAS; the fake NRAS returns a controlled verdict and records
+  the evidence passed to it.
 - An autouse fixture clears cached E2EE transports and the attestation cache
-  between tests so each test builds an env-faithful client.
-- In live runs the autouse env-pointing fixture is disabled, so the real
-  credentials and production bases are used.
+  between tests so each test builds an env-faithful client. There are no
+  verification toggle values to reset.
+- `test_attestation.py::test_attestation_cannot_be_disabled_by_env` sets every
+  removed toggle to a disabling value and asserts that bad evidence is still
+  refused before `/e2e/invoke` — a regression guard against a backdoor.
+- `test_e2ee_litellm.py::test_e2ee_hosts_are_derived_and_env_overrides_are_ignored`
+  asserts that host scoping comes only from the two fixed Chutes endpoints; an
+  injected endpoint/host variable is ignored.
+- In live runs the autouse fixture is disabled, so the real credentials and the
+  fixed production endpoints are used.
 
 ## Adding a test
 
