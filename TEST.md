@@ -33,6 +33,7 @@ CHUTES_LIVE_TEE=1 CHUTES_API_KEY=cpk_... \
 | `tests/test_tee_quote.py` | offline | TDX quote parser and DCAP wrapper: header/length validation, MRTD/RTMR/report_data extraction, parsed-vs-DCAP cross-check, TCB status/debug/advisory policy, and the TDX-module TCB fallback, with fake DCAP input. |
 | `tests/test_tee_measurements.py` | offline | Measurement policy: public-endpoint and local-YAML parsing, TTL/last-known-good cache behaviour, exact MRTD + RTMR0-3 matching, ambiguity and unavailable-source fail-closed cases. |
 | `tests/test_e2ee_litellm.py` | offline | The host-scoped transport swap (`e2ee_litellm.install()`), the always-installed attested-instance selection filter, and fixed host scoping (only the two fixed Chutes hosts, not overridable). Includes the TOCTOU regression: a same-id/different-`e2e_pubkey` substitution is refused before `/e2e/invoke`. |
+| `tests/test_cli.py` | offline | The CLI entry point: argparse `--config`/`--host`/`--port`, CLI-over-environment precedence, missing-config and invalid-port exit codes, `_serve` argument forwarding with `--num_workers 1`, click error mapping, and the regression that `e2ee_litellm.install()` runs before in-process serving. No server, uvicorn or network is started. |
 | `tests/test_live_attestation.py` | live | Real discovery + full evidence verification against a live `-TEE` chute: mandatory Intel DCAP, exact key/certificate bindings, a non-empty published measurement list, and mandatory NVIDIA NRAS GPU verification with GPU-count equality. Skips when the network or PCCS/NRAS is unreachable; there is no skip-by-disabling path. |
 | `tests/test_live_proxy.py` | live | Real custom-provider invokes, thinking visibility, a real in-process proxy reached over HTTP, and a gated request whose invoked `X-Instance-Id` is asserted to be in the verified set. |
 
@@ -162,4 +163,4 @@ dropped (`UnsupportedParamsError`). In the generated proxy config this is
 | ------ | ------- |
 | `scripts/proxy_test.py` | Ad-hoc smoke test against an already-running proxy. |
 | `scripts/verify_attestation.py` | Standalone attestation CLI for one model/chute. |
-| `scripts/live_server.py` | In-process proxy launcher used by the live server test (keeps registrations alive; the deployed CLI `exec`s `litellm`). |
+| `scripts/live_server.py` | In-process proxy launcher used by the live server test. The deployed entry point also serves in-process; this launcher remains for tests that serve a pre-expanded config and can pick a free port. |
