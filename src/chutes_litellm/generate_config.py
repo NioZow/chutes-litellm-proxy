@@ -225,6 +225,12 @@ def _build_chutes_model_info(model: dict) -> dict:
       - supports_function_calling / supports_vision
       - max_input_tokens / max_output_tokens
       - mode: "chat"
+
+    Output limits are deliberately reported as ``0`` for every Chutes model,
+    regardless of the upstream ``max_output_length`` metadata.  This lets each
+    client fall back to its own default output limit (opencode uses 32000)
+    instead of inheriting a Chutes-specific value.  Input limits still come
+    from Chutes ``context_length``.
     """
     features = set(model.get("supported_features") or [])
     modalities = set(model.get("input_modalities") or [])
@@ -238,8 +244,9 @@ def _build_chutes_model_info(model: dict) -> dict:
 
     if model.get("context_length"):
         info["max_input_tokens"] = model["context_length"]
-    if model.get("max_output_length"):
-        info["max_output_tokens"] = model["max_output_length"]
+    # Always 0 so clients apply their own default output limit.  Chutes
+    # upstream reports ``max_output_length``, but it must not be propagated.
+    info["max_output_tokens"] = 0
 
     if modalities:
         info["input_modalities"] = sorted(modalities)

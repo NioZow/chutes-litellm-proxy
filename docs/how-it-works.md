@@ -112,8 +112,9 @@ model list, and emits one concrete entry per model:
 Important behaviours:
 
 - Providers without a key are skipped, not fatal.
-- Chutes keeps only ids ending in `-TEE` and adds `model_info` capability and
-  limit fields used by opencode.
+- Chutes keeps only ids ending in `-TEE` and adds `model_info` capability fields
+  and the context limit used by opencode. Output limits are reported as `0` so
+  clients use their own default.
 - Chutes entries also get `allowed_openai_params` so thinking/reasoning
   parameters are forwarded instead of dropped.
 - Fixed (non-wildcard) entries are copied through unchanged, which is how a
