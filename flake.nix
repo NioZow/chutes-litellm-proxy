@@ -144,11 +144,10 @@
         propagatedBuildInputs = [python.pkgs.cffi];
       };
 
-      # TODO(local-dev): the `instance_filter` hook and fork tests live in the
-      # local clone at ./chutes-e2ee-transport (see pyproject [tool.uv.sources]),
-      # which is *ahead* of this pinned rev.  Leave this rev as the committed
-      # default; once the fork changes are pushed, update `rev`/`hash` here (and
-      # delete the [tool.uv.sources] override in pyproject.toml + re-lock).
+      # This rev must match `uv.lock`: it provides the `instance_filter` hook
+      # the attestation gate relies on.  An older chutes-e2ee builds fine but
+      # rejects the kwarg at request time (AsyncChutesE2EETransport.__init__),
+      # so the proxy now refuses to start unless the hook is present.
       chutes-e2ee = python.pkgs.buildPythonPackage rec {
         pname = "chutes-e2ee";
         version = "0.1.1";
@@ -156,8 +155,8 @@
         src = pkgs.fetchFromGitHub {
           owner = "niozow";
           repo = "chutes-e2ee-transport";
-          rev = "5630286de88d0797bf605279f19b974db25bded7";
-          hash = "sha256-ow43baqoahITGaeSxMoSyN1hXX4qGVSqlfrb8nFnFFk=";
+          rev = "844641b9deacb89defd1b6a650c26df716788064";
+          hash = "sha256-eO6kzcoSNBPBbs1lM4cIOJjZ5dyfKoFEHg/G+WHhSIA=";
         };
         nativeBuildInputs = [python.pkgs.hatchling];
         propagatedBuildInputs = [

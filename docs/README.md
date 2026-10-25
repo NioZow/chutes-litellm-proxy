@@ -67,7 +67,8 @@ always on. There is no endpoint, host, or verification override.
 | Protocol-faithful offline mock + tests | `tests/mock_chutes_server.py`, `tests/test_e2ee_litellm.py`, `tests/test_attestation.py` |
 
 > The `chutes-e2ee` transport is vendored from the fork
-> [`niozow/chutes-e2ee-transport`](https://github.com/niozow/chutes-e2ee-transport),
-> cloned locally at `./chutes-e2ee-transport` (gitignored). The proxy pins a
-> specific commit; the fork adds the authenticated-instance hook described in
+> [`niozow/chutes-e2ee-transport`](https://github.com/niozow/chutes-e2ee-transport).
+> The proxy pins a specific commit in both `uv.lock` and `flake.nix`; the two
+> must stay identical, and `tests/test_packaging.py` enforces that. The fork
+> adds the authenticated-instance hook described in
 > [attestation.md §9](attestation.md#9-binding-attested-instances-to-selection).

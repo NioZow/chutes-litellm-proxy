@@ -200,6 +200,9 @@ def _sync_transport(api_key: str) -> httpx.BaseTransport:
         if transport is None:
             from chutes_e2ee import ChutesE2EETransport
 
+            from .e2ee_litellm import _require_attestation_hook
+
+            _require_attestation_hook()
             transport = ChutesE2EETransport(
                 api_key=api_key,
                 api_base=endpoints.API_BASE,
@@ -218,6 +221,9 @@ def _async_transport(api_key: str) -> httpx.AsyncBaseTransport:
         if transport is None:
             from chutes_e2ee import AsyncChutesE2EETransport
 
+            from .e2ee_litellm import _require_attestation_hook
+
+            _require_attestation_hook()
             transport = AsyncChutesE2EETransport(
                 api_key=api_key,
                 api_base=endpoints.API_BASE,
@@ -746,6 +752,9 @@ def register() -> None:
     prefix (e.g. ``chutes_e2ee/Test/Model-TEE``) so LiteLLM dispatches them to
     this handler instead of its builtin ``chutes`` openai-compatible provider.
     """
+    from .e2ee_litellm import _require_attestation_hook
+
+    _require_attestation_hook()
     _install_supported_params()
     for entry in litellm.custom_provider_map:
         if entry.get("provider") == PROVIDER:

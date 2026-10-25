@@ -62,7 +62,10 @@ LiteLLM plus a scoped HTTP transport, not a separate proxy.
    `BaseOpenAILLM._get_sync_http_client` and `_get_async_http_client` for shared
    `httpx` clients whose transport encrypts only the fixed Chutes hosts. It is a
    no-op when `CHUTES_API_KEY` is unset or `chutes_e2ee` is not importable, so
-   the other providers keep working.
+   the other providers keep working. Before patching, it verifies that both
+   transports expose the mandatory `instance_filter` hook and refuses to start
+   otherwise, so an old/wrong `chutes-e2ee` build cannot silently serve Chutes
+   without attested-instance pinning.
 4. **Optionally register the custom provider.** A truthy
    `CHUTES_CUSTOM_PROVIDER` (`1`, `true`, `yes`, `on`) imports
    `chutes_litellm.custom_provider`, appends `chutes_e2ee` to

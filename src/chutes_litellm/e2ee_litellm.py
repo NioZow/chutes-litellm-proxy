@@ -28,6 +28,7 @@ disabled.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import threading
@@ -51,6 +52,36 @@ def _transport_classes() -> tuple[type, type]:
     if _chutes_e2ee is None:  # pragma: no cover
         raise RuntimeError(f"chutes_e2ee is not importable: {_IMPORT_ERROR}")
     return _chutes_e2ee.ChutesE2EETransport, _chutes_e2ee.AsyncChutesE2EETransport
+
+
+_ATTESTATION_HOOK = "instance_filter"
+
+
+def _require_attestation_hook() -> None:
+    """Fail fast unless both transports expose the ``instance_filter`` kwarg.
+
+    The hook pins each request to the instance whose attestation quote passed.
+    An older chutes-e2ee cannot accept it, so constructing the transport then
+    raises at request time with an opaque 500.  Requiring the explicit
+    parameter here turns that into a clear startup failure instead of serving
+    Chutes without attested-instance pinning.
+    """
+    missing: list[str] = []
+    for transport_cls in _transport_classes():
+        params = inspect.signature(transport_cls.__init__).parameters
+        param = params.get(_ATTESTATION_HOOK)
+        if param is None or param.kind not in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            missing.append(transport_cls.__name__)
+    if missing:
+        raise RuntimeError(
+            "chutes_e2ee is missing the mandatory "
+            f"{_ATTESTATION_HOOK!r} hook on {', '.join(missing)}; refusing to "
+            "run without attested-instance pinning. Install the pinned "
+            "chutes-e2ee revision from uv.lock / flake.nix."
+        )
 
 
 DEFAULT_LLM_HOST = "llm.chutes.ai"
@@ -125,6 +156,7 @@ class _ChutesScopedTransport(httpx.BaseTransport):
     ) -> None:
         if _IMPORT_ERROR is not None:  # pragma: no cover
             raise RuntimeError(f"chutes_e2ee is not importable: {_IMPORT_ERROR}")
+        _require_attestation_hook()
         _SyncCls, _ = _transport_classes()
         self._api_key = api_key
         self._hosts = hosts
@@ -201,6 +233,7 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
     ) -> None:
         if _IMPORT_ERROR is not None:  # pragma: no cover
             raise RuntimeError(f"chutes_e2ee is not importable: {_IMPORT_ERROR}")
+        _require_attestation_hook()
         _, _AsyncCls = _transport_classes()
         self._api_key = api_key
         self._hosts = hosts
@@ -213,7 +246,7 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
             api_base=self._e2e_api_base,
             models_base=self._models_base,
             inner=self._inner,
-            # Fork-only kwarg; see the sync transport above.
+            # Same mandatory attested-instance pinning as the sync transport.
             instance_filter=self._instance_filter,
         )
 
@@ -354,6 +387,7 @@ def install() -> bool:
     if _IMPORT_ERROR is not None or not _api_key():
         return False
 
+    _require_attestation_hook()
     cls = _find_base_class()
     with _lock:
         if _patched:

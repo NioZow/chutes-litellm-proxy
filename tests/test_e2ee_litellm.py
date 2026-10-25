@@ -8,6 +8,7 @@ plaintext request ever reaches the ``/v1/chat/completions`` path.
 """
 
 import asyncio
+import inspect
 import json
 
 import httpx
@@ -224,15 +225,15 @@ def _record_transport_ctor(monkeypatch):
     captured: dict = {}
 
     class _FakeTransport:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+        def __init__(self, api_key, *, instance_filter, **kwargs):
+            captured.update(api_key=api_key, instance_filter=instance_filter, **kwargs)
 
         def close(self):
             pass
 
     class _FakeAsyncTransport:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+        def __init__(self, api_key, *, instance_filter, **kwargs):
+            captured.update(api_key=api_key, instance_filter=instance_filter, **kwargs)
 
         async def aclose(self):
             pass
@@ -252,6 +253,67 @@ def test_filter_is_always_installed(monkeypatch):
     captured.clear()
     el._ChutesScopedAsyncTransport("cpk", hosts={"h"})
     assert callable(captured.get("instance_filter"))
+
+
+def test_installed_transports_expose_instance_filter_hook():
+    """Regression: a stale chutes-e2ee pin must fail here, not at request time.
+
+    The Nix package previously pinned an older fork revision.  It built fine,
+    then every Chutes request returned 500 with
+    ``AsyncChutesE2EETransport.__init__() got an unexpected keyword argument
+    'instance_filter'``.  Assert against the *installed* API, not a fake.
+    """
+    from chutes_e2ee import AsyncChutesE2EETransport, ChutesE2EETransport
+
+    for transport_cls in (ChutesE2EETransport, AsyncChutesE2EETransport):
+        param = inspect.signature(transport_cls.__init__).parameters.get("instance_filter")
+        assert param is not None, f"{transport_cls.__name__} lacks instance_filter"
+        assert param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ), f"{transport_cls.__name__}.instance_filter is not an explicit keyword"
+
+
+def test_scoped_transports_construct_against_installed_chutes_e2ee():
+    """No fakes: both scoped wrappers must accept the real package's API."""
+    from chutes_litellm import e2ee_litellm as el
+
+    sync_transport = el._ChutesScopedTransport("cpk_contract", hosts={"h"})
+    async_transport = el._ChutesScopedAsyncTransport("cpk_contract", hosts={"h"})
+    sync_transport.close()
+    asyncio.run(async_transport.aclose())
+
+
+def test_preflight_rejects_transport_without_instance_filter(monkeypatch):
+    """The hook is mandatory, so a transport lacking it must be refused."""
+    from chutes_litellm import e2ee_litellm as el
+
+    class _OldTransport:
+        def __init__(self, api_key):
+            pass
+
+    monkeypatch.setattr(el, "_transport_classes", lambda: (_OldTransport, _OldTransport))
+
+    with pytest.raises(RuntimeError, match="instance_filter"):
+        el._require_attestation_hook()
+
+
+def test_install_fails_fast_when_instance_filter_hook_is_missing(monkeypatch):
+    """A bad package must abort startup, not survive until the first request."""
+    from chutes_litellm import e2ee_litellm as el
+
+    class _OldTransport:
+        def __init__(self, api_key):
+            pass
+
+    monkeypatch.setenv("CHUTES_API_KEY", "cpk_contract")
+    monkeypatch.setattr(el, "_IMPORT_ERROR", None)
+    monkeypatch.setattr(el, "_patched", False)
+    monkeypatch.setattr(el, "_transport_classes", lambda: (_OldTransport, _OldTransport))
+
+    with pytest.raises(RuntimeError, match="instance_filter"):
+        el.install()
+    assert el._patched is False
 
 
 def test_e2ee_hosts_are_derived_and_env_overrides_are_ignored(monkeypatch):
