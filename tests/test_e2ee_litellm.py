@@ -249,10 +249,13 @@ def test_filter_is_always_installed(monkeypatch):
     captured = _record_transport_ctor(monkeypatch)
     el._ChutesScopedTransport("cpk", hosts={"h"})
     assert callable(captured.get("instance_filter"))
+    # Supplying `inner` would bypass chutes-e2ee's env-proxy-aware default.
+    assert "inner" not in captured
 
     captured.clear()
     el._ChutesScopedAsyncTransport("cpk", hosts={"h"})
     assert callable(captured.get("instance_filter"))
+    assert "inner" not in captured
 
 
 def test_installed_transports_expose_instance_filter_hook():
@@ -280,6 +283,30 @@ def test_scoped_transports_construct_against_installed_chutes_e2ee():
 
     sync_transport = el._ChutesScopedTransport("cpk_contract", hosts={"h"})
     async_transport = el._ChutesScopedAsyncTransport("cpk_contract", hosts={"h"})
+    sync_transport.close()
+    asyncio.run(async_transport.aclose())
+
+
+def test_chutes_transport_uses_library_env_proxy_default(monkeypatch):
+    """Regression: the Chutes transport must not be given a bare `inner`.
+
+    `chutes-e2ee` only applies HTTP(S)_PROXY / NO_PROXY in its default inner.
+    Overriding it with a plain httpx transport bypassed Squid in the deployed
+    guest and made discovery time out after 15s.
+    """
+    import chutes_e2ee.transport as ct
+
+    from chutes_litellm import e2ee_litellm as el
+
+    sync_sentinel = httpx.HTTPTransport()
+    async_sentinel = httpx.AsyncHTTPTransport()
+    monkeypatch.setattr(ct, "_default_transport", lambda: sync_sentinel)
+    monkeypatch.setattr(ct, "_default_async_transport", lambda: async_sentinel)
+
+    sync_transport = el._ChutesScopedTransport("cpk_proxy", hosts={"h"})
+    async_transport = el._ChutesScopedAsyncTransport("cpk_proxy", hosts={"h"})
+    assert sync_transport._transport._inner is sync_sentinel
+    assert async_transport._transport._inner is async_sentinel
     sync_transport.close()
     asyncio.run(async_transport.aclose())
 

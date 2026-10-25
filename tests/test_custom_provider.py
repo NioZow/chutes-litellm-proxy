@@ -190,3 +190,45 @@ def test_attestation_gate_fails_closed(mock_server):
         assert mock_server.state.invokes == []
     finally:
         mock_server.state.evidence_ok = True
+
+
+def test_transports_do_not_override_proxy_aware_inner(monkeypatch):
+    """Chutes transports must use the library's env-proxy-aware default inner.
+
+    Hardened deployments (no direct egress) rely on HTTP(S)_PROXY/NO_PROXY.
+    Passing a bare `inner` transport bypassed them and made discovery hang.
+    """
+    import sys
+    import types
+
+    from chutes_litellm import custom_provider as cp
+
+    captured: dict[str, dict] = {}
+
+    class _FakeSync:
+        def __init__(self, **kwargs):
+            captured["sync"] = kwargs
+
+        def close(self):
+            pass
+
+    class _FakeAsync:
+        def __init__(self, **kwargs):
+            captured["async"] = kwargs
+
+        async def aclose(self):
+            pass
+
+    fake = types.ModuleType("chutes_e2ee")
+    fake.ChutesE2EETransport = _FakeSync
+    fake.AsyncChutesE2EETransport = _FakeAsync
+    monkeypatch.setitem(sys.modules, "chutes_e2ee", fake)
+    cp.reset_clients()
+    try:
+        cp._sync_transport("cpk_proxy")
+        cp._async_transport("cpk_proxy")
+    finally:
+        cp.reset_clients()
+
+    assert "inner" not in captured["sync"]
+    assert "inner" not in captured["async"]

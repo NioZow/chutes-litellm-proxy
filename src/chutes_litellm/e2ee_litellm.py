@@ -163,12 +163,15 @@ class _ChutesScopedTransport(httpx.BaseTransport):
         self._e2e_api_base = endpoints.API_BASE
         self._models_base = endpoints.MODELS_BASE
         self._api_key_provider = api_key_provider
+        # The passthrough path stays direct; the Chutes path must use the
+        # library's default inner transport so HTTP(S)_PROXY / NO_PROXY are
+        # honoured.  Supplying a bare transport here bypasses the proxy that
+        # hardened deployments require and makes discovery time out.
         self._inner = httpx.HTTPTransport(verify=True)
         self._transport = _SyncCls(
             api_key=api_key,
             api_base=self._e2e_api_base,
             models_base=self._models_base,
-            inner=self._inner,
             # `instance_filter` restricts the transport's own instance pool to
             # the instances the gate verified, so selection and verification
             # cannot diverge.
@@ -240,12 +243,13 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
         self._e2e_api_base = endpoints.API_BASE
         self._models_base = endpoints.MODELS_BASE
         self._api_key_provider = api_key_provider
+        # As above: omit `inner` so chutes-e2ee builds the env-proxy-aware
+        # transport for the E2EE discovery and invoke calls.
         self._inner = httpx.AsyncHTTPTransport(verify=True)
         self._transport = _AsyncCls(
             api_key=api_key,
             api_base=self._e2e_api_base,
             models_base=self._models_base,
-            inner=self._inner,
             # Same mandatory attested-instance pinning as the sync transport.
             instance_filter=self._instance_filter,
         )

@@ -298,6 +298,62 @@ def test_live_proxy_server_reachable(live_env, registered_provider, model, api_k
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _native_proxy_config(model: str) -> dict:
+    """The deployed shape: LiteLLM's builtin ``chutes/`` provider + E2EE swap."""
+    return {
+        "model_list": [
+            {
+                "model_name": f"chutes/{model}",
+                "litellm_params": {
+                    "model": f"chutes/{model}",
+                    "api_key": "os.environ/CHUTES_API_KEY",
+                },
+            }
+        ],
+        "general_settings": {"master_key": None},
+    }
+
+
+def test_live_native_chutes_proxy_server(live_env, model):
+    """Boot a real proxy using the deployed ``chutes/`` path and send messages.
+
+    This exercises exactly what the production service does: the builtin
+    ``chutes`` provider plus ``e2ee_litellm.install()`` (not the opt-in custom
+    provider).  Both non-streaming and streaming requests must return ``pong``.
+    """
+    proc = None
+    tmpdir = Path(tempfile.mkdtemp(prefix="chutes-live-native-"))
+    try:
+        config_path = tmpdir / "config.live.yml"
+        config_path.write_text(yaml.safe_dump(_native_proxy_config(model)))
+
+        with _free_port_socket() as sock:
+            port = sock.getsockname()[1]
+        env = os.environ.copy()
+        env["CONFIG_FILE_PATH"] = str(config_path)
+        env["CHUTES_E2EE_INSTALL"] = "1"
+        proc = subprocess.Popen(
+            [sys.executable, str(LAUNCHER), "--config", str(config_path), "--host", "127.0.0.1", "--port", str(port)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        base = f"http://127.0.0.1:{port}"
+        _wait_for_health(base, proc)
+        _chat_completion_over_http(base, f"chutes/{model}")
+        _stream_completion_over_http(base, f"chutes/{model}")
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def test_live_gated_request_uses_verified_instance(live_env, registered_provider, api_key, monkeypatch):
     """With the attestation gate on, the invoked X-Instance-Id must be verified.
 

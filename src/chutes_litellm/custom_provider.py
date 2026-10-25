@@ -207,7 +207,9 @@ def _sync_transport(api_key: str) -> httpx.BaseTransport:
                 api_key=api_key,
                 api_base=endpoints.API_BASE,
                 models_base=endpoints.MODELS_BASE,
-                inner=httpx.HTTPTransport(verify=True),
+                # Omit `inner`: chutes-e2ee then builds the env-proxy-aware
+                # transport (HTTP(S)_PROXY / NO_PROXY) required by hardened
+                # deployments that have no direct egress.
                 instance_filter=_attestation_instance_filter(api_key),
             )
             _sync_transports[api_key] = transport
@@ -228,7 +230,7 @@ def _async_transport(api_key: str) -> httpx.AsyncBaseTransport:
                 api_key=api_key,
                 api_base=endpoints.API_BASE,
                 models_base=endpoints.MODELS_BASE,
-                inner=httpx.AsyncHTTPTransport(verify=True),
+                # As above: let the library honour the deployment's proxy env.
                 instance_filter=_attestation_instance_filter(api_key),
             )
             _async_transports[api_key] = transport

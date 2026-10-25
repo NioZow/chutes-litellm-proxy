@@ -269,6 +269,13 @@ or Nix option that changes them in production, and the encrypted host set is
 derived from them. Both the E2EE transport and the plain passthrough use
 `httpx` transports with `verify=True`; TLS verification has no off switch.
 
+The E2EE transports are deliberately constructed **without** an overriding
+`inner` transport, so `chutes-e2ee` uses its environment-aware default and
+honours `HTTP(S)_PROXY` / `NO_PROXY`. This is mandatory in the shipped NixOS
+guest, which has no direct egress and reaches Chutes through Squid. Supplying a
+bare `httpx` transport here bypasses the proxy and makes discovery hang until
+its 15-second timeout.
+
 ## Trust boundaries and non-goals
 
 **Covered.** The TDX quote covers the VM firmware, boot chain, and rootfs

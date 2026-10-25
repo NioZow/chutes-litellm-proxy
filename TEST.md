@@ -32,7 +32,7 @@ CHUTES_LIVE_TEE=1 CHUTES_API_KEY=cpk_... \
 | `tests/test_attestation.py` | offline | The always-on attestation pipeline: signed-body signature, exact `report_data[:32]`/`report_data[32:64]` bindings, certificate binding, mandatory DCAP, exact measurement matching, mandatory NRAS with GPU-count equality, unsigned/legacy rejection, tamper/fail-closed behaviour, strict all-instances gating, `chute_id` cache/negative-cache/single-flight, and the NVIDIA verifier with a fake SDK (evidence normalisation, GPU-count check, NRAS URL, fail-closed). Includes the regression test that the removed env toggles are inert. |
 | `tests/test_tee_quote.py` | offline | TDX quote parser and DCAP wrapper: header/length validation, MRTD/RTMR/report_data extraction, parsed-vs-DCAP cross-check, TCB status/debug/advisory policy, and the TDX-module TCB fallback, with fake DCAP input. |
 | `tests/test_tee_measurements.py` | offline | Measurement policy: public-endpoint and local-YAML parsing, TTL/last-known-good cache behaviour, exact MRTD + RTMR0-3 matching, ambiguity and unavailable-source fail-closed cases. |
-| `tests/test_e2ee_litellm.py` | offline | The host-scoped transport swap (`e2ee_litellm.install()`), the always-installed attested-instance selection filter, and fixed host scoping (only the two fixed Chutes hosts, not overridable). Includes the TOCTOU regression: a same-id/different-`e2e_pubkey` substitution is refused before `/e2e/invoke`. |
+| `tests/test_e2ee_litellm.py` | offline | The host-scoped transport swap (`e2ee_litellm.install()`), the always-installed attested-instance selection filter, fixed host scoping (only the two fixed Chutes hosts, not overridable), and the regression that the Chutes transport is not given a bare `inner` (which would bypass `HTTP(S)_PROXY`/`NO_PROXY`). Includes the TOCTOU regression: a same-id/different-`e2e_pubkey` substitution is refused before `/e2e/invoke`. |
 | `tests/test_cli.py` | offline | The CLI entry point: argparse `--config`/`--host`/`--port`, CLI-over-environment precedence, missing-config and invalid-port exit codes, `_serve` argument forwarding with `--num_workers 1`, click error mapping, and the regression that `e2ee_litellm.install()` runs before in-process serving. No server, uvicorn or network is started. |
 | `tests/test_live_attestation.py` | live | Real discovery + full evidence verification against a live `-TEE` chute: mandatory Intel DCAP, exact key/certificate bindings, a non-empty published measurement list, and mandatory NVIDIA NRAS GPU verification with GPU-count equality. Skips when the network or PCCS/NRAS is unreachable; there is no skip-by-disabling path. |
 | `tests/test_live_proxy.py` | live | Real custom-provider invokes, thinking visibility, a real in-process proxy reached over HTTP, and a gated request whose invoked `X-Instance-Id` is asserted to be in the verified set. |
@@ -72,7 +72,9 @@ LD_LIBRARY_PATH="$(dirname "$(gcc -print-file-name=libstdc++.so)")" \
 - `CHUTES_LIVE_TEE=1` — unlocks the live tests.
 - `CHUTES_LIVE_MODEL` — optional; the target model. Auto-selected from the live
   listing when unset (prefers a DeepSeek `-TEE` model, i.e. V4-Flash-0731).
-- Outbound access to `api.chutes.ai` / `llm.chutes.ai`.
+- Outbound access to `api.chutes.ai` / `llm.chutes.ai`; if the host has no
+  direct egress, set `HTTP(S)_PROXY` and `NO_PROXY` (the tests and transport
+  honour them).
 
 > Run the live modules on their **own**. The offline suite points the transport
 > at a mock and would otherwise clobber your real credentials.
@@ -107,6 +109,9 @@ LD_LIBRARY_PATH="$(dirname "$(gcc -print-file-name=libstdc++.so)")" \
    (`scripts/live_server.py`) and drives it over HTTP: health check, non-stream
    `/v1/chat/completions`, streamed completion, and a reasoning request that
    asserts `reasoning_content` survives the proxy.
+5. `test_live_native_chutes_proxy_server` — boots the **deployed** path
+   (`chutes/<model>` plus `e2ee_litellm.install()`, not the opt-in custom
+   provider) and sends real non-streaming and streaming messages over HTTP.
 
 > `-TEE` instances may cold-start; the live helpers retry transient failures
 > with backoff.
