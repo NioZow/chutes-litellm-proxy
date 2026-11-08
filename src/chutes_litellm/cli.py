@@ -157,6 +157,34 @@ def _strip_model_prefix(value: object, prefix: str) -> str | None:
     return model_id
 
 
+def _chutes_tee_flags(config: dict) -> tuple[list[str], list[str]]:
+    """Return ``(tee_models, non_tee_models)`` from a generated config.
+
+    Chutes now serves both confidential-compute and plain models under the
+    same ``chutes/`` prefix.  The E2EE transport must only wrap the TEE ones,
+    so the startup wiring forwards the catalog's ``confidential_compute`` flag.
+    """
+    tee: list[str] = []
+    non_tee: list[str] = []
+    for entry in config.get("model_list") or []:
+        if not isinstance(entry, dict):
+            continue
+        params = entry.get("litellm_params")
+        wire_model = params.get("model") if isinstance(params, dict) else None
+        if not isinstance(wire_model, str) or not wire_model.startswith("chutes/"):
+            continue
+        model_id = wire_model[len("chutes/"):].strip()
+        if not model_id:
+            continue
+        info = entry.get("model_info")
+        flag = info.get("confidential_compute") if isinstance(info, dict) else None
+        if flag is True:
+            tee.append(model_id)
+        elif flag is False:
+            non_tee.append(model_id)
+    return tee, non_tee
+
+
 def _near_model_ids(config: dict) -> list[str]:
     """Collect bare NEAR model ids from a generated config's ``model_list``."""
     ids: list[str] = []
@@ -315,6 +343,10 @@ def litellm_proxy(argv: Sequence[str] | None = None) -> int:
     # events are emitted to both stderr and CHUTES_LOG_FILE.
     logger = get_logger("chutes_litellm")
     logger.info("litellm_proxy: starting (config=%s)", output)
+    # Non-TEE Chutes deployments share the API host but cannot be encrypted;
+    # tell the scoped transport which model ids are TEE before it is installed.
+    tee_models, non_tee_models = _chutes_tee_flags(_read_generated_config(output))
+    e2ee_litellm.configure_tee_models(tee_models, non_tee_models)
     # No-op (keeps serving the other providers) when CHUTES_API_KEY is unset or
     # the chutes_e2ee package is missing.
     e2ee_litellm.install()

@@ -5,16 +5,17 @@ model providers. It exposes one `/v1` API, expands each provider's model catalog
 at startup, and forwards all other traffic normally. Two providers are
 different:
 
-- **Chutes `*-TEE`** requests are end-to-end encrypted with ML-KEM-768 +
-  ChaCha20-Poly1305 and are sent only to instances whose Intel TDX and NVIDIA GPU
-  attestation verifies.
+- **Chutes** serves both confidential-compute (`*-TEE`) and plain models.
+  `*-TEE` requests are end-to-end encrypted with ML-KEM-768 + ChaCha20-Poly1305
+  and are sent only to instances whose Intel TDX and NVIDIA GPU attestation
+  verifies; plain models are forwarded normally.
 - **NEAR AI `<model>`** requests go through Gateway and (for true TEE models)
   model attestation, TLS SPKI pinning and response-signature verification, with
   E2EE v3 for TEE models.
 
-TEE attestation, Intel DCAP quote verification, NVIDIA NRAS GPU verification,
-measurement matching, E2EE, TLS verification and response receipts are mandatory
-and cannot be disabled.
+For TEE models, TEE attestation, Intel DCAP quote verification, NVIDIA NRAS GPU
+verification, measurement matching, E2EE, TLS verification and response receipts
+are mandatory and cannot be disabled.
 
 ## Quickstart
 
@@ -69,12 +70,29 @@ Only providers whose API key is set are expanded; the others are skipped.
 | DeepSeek          | `DEEPSEEK_API_KEY`   | `deepseek/`   |
 | Meta              | `META_API_KEY`       | `meta/`       |
 | Mistral           | `MISTRAL_API_KEY`    | `mistral/`    |
-| Chutes TEE (E2EE) | `CHUTES_API_KEY`     | `chutes/`     |
+| Chutes (E2EE + plain) | `CHUTES_API_KEY`     | `chutes/`     |
 | NEAR AI Cloud     | `NEARAI_API_KEY`     | `nearai/`     |
 
-Chutes model discovery keeps only models whose id ends in `-TEE`. NEAR AI
-discovery keeps chat models and serves them through the `nearai_e2ee` provider;
-TEE and Gateway-routed models are both supported.
+Chutes discovery keeps every chat model, so plain deployments are available
+alongside the `-TEE` ones. Only `-TEE` (or `confidential_compute`) models use
+the E2EE transport; the others are forwarded normally. NEAR AI discovery keeps
+chat models and serves them through the `nearai_e2ee` provider; TEE and
+Gateway-routed models are both supported.
+
+Every generated entry also carries `model_info.display_name`, formatted as
+`<Model> (<Source>)`:
+`Mistral Large 4 (Chutes)`, `Mistral Large 4 (Mistral)` and
+`Mistral Large 4 (NEAR)` share one id space under the `litellm` provider but
+stay distinguishable. A `TEE` suffix marks models that run on attested hardware:
+`(Chutes TEE)` for Chutes confidential-compute deployments, and `(NEAR TEE)`
+only for models on NEAR's own servers — models NEAR merely proxies are labelled
+`(NEAR)`. Names are computed at startup from the live catalogs; clients that
+query `/v1/model/info` see them immediately.
+
+LiteLLM's bundled model map predates some direct-provider models.
+`DIRECT_MODEL_METADATA` in `generate_config.py` supplies the missing limits and
+capabilities; DeepSeek's current models are advertised with their real 1M
+input window instead of falling back to a small client default.
 
 ## CLI and environment
 

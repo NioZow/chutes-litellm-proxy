@@ -495,3 +495,87 @@ def test_transport_key_substitution_is_refused_before_invoke(mock_server, monkey
         mock_server.state.discovery_pubkey_b64 = None
         el._clients.clear()
         el._aclients.clear()
+
+
+# ---------------------------------------------------------------------------
+# TEE classification (plain Chutes models share the host but have no E2EE)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tee_flags():
+    """Set the startup classification and restore the module state afterwards."""
+    from chutes_litellm import e2ee_litellm as el
+
+    def _set(tee=(), non_tee=()):
+        el.configure_tee_models(tee, non_tee)
+
+    yield _set
+    el.configure_tee_models()
+
+
+@pytest.mark.parametrize(
+    ("catalog", "model", "expected"),
+    [
+        ({"tee": ["A/Model-TEE"], "non_tee": []}, "A/Model-TEE", True),
+        ({"tee": [], "non_tee": ["A/Model-TEE"]}, "A/Model-TEE", False),
+        # Explicit catalog flags beat the id suffix in both directions.
+        ({"tee": ["A/Plain"], "non_tee": []}, "A/Plain", True),
+        ({"tee": [], "non_tee": ["A/Other"]}, "A/Other", False),
+    ],
+)
+def test_is_e2ee_model_uses_catalog_classification(tee_flags, catalog, model, expected):
+    from chutes_litellm import e2ee_litellm as el
+
+    tee_flags(**catalog)
+
+    assert el.is_e2ee_model(f"chutes/{model}") is expected
+    assert el.is_e2ee_model(f"chutes_e2ee/{model}") is expected
+
+
+def test_is_e2ee_model_falls_back_to_the_tee_suffix(tee_flags):
+    """Without startup classification (ad-hoc clients) the id suffix decides."""
+    from chutes_litellm import e2ee_litellm as el
+
+    assert el.is_e2ee_model("chutes/Qwen/Qwen3.8-27B-TEE") is True
+    assert el.is_e2ee_model("chutes/deepseek-ai/DeepSeek-V4.1-Flash-1017") is False
+    assert el.is_e2ee_model(None) is False
+    assert el.is_e2ee_model("") is False
+
+
+def test_non_tee_chutes_request_bypasses_the_encrypted_transport(tee_flags):
+    """A plain Chutes model must be sent in the clear, never through E2EE."""
+    from chutes_litellm import e2ee_litellm as el
+
+    tee_flags(non_tee=["deepseek-ai/DeepSeek-V4.1-Flash-1017"])
+
+    class _Recording:
+        def __init__(self):
+            self.calls = []
+
+        def handle_request(self, request):
+            self.calls.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        def close(self):
+            pass
+
+    inner = _Recording()
+    e2ee = _Recording()
+    transport = object.__new__(el._ChutesScopedTransport)
+    transport._hosts = {"llm.chutes.ai"}
+    transport._inner = inner
+    transport._transport = e2ee
+    transport._api_key = "cpk_test"
+    transport._api_key_provider = None
+
+    request = httpx.Request(
+        "POST",
+        "https://llm.chutes.ai/v1/chat/completions",
+        json={"model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "messages": []},
+    )
+    response = transport.handle_request(request)
+
+    assert response.status_code == 200
+    assert inner.calls == [request]
+    assert e2ee.calls == []

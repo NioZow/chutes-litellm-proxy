@@ -65,6 +65,15 @@ this repository overrides an endpoint, disables a check, or patches the SDK.
 using `nearai_e2ee/<id>` directly also works. There is no alias that maps a NEAR
 model to another provider.
 
+Each generated entry carries `model_info.display_name`, built from the catalog's
+`name` and suffixed with the source: `Claude Sonnet 5 (NEAR)` for models NEAR
+proxies, and `(NEAR TEE)` only when the model runs on NEAR's own attested
+hardware. The badge follows `owned_by == "nearai"`, which the catalog keeps in
+exact sync with `providerType == "vllm"` plus `attestationSupported`; proxied
+models (`attested 3p`, or the upstream vendor) never get the TEE badge even when
+they are encrypted at their origin. Names are recomputed from the live catalog
+at every startup, so no static list has to be maintained.
+
 Bare upstream ids are canonical in configuration and environment lists:
 `NEARAI_PREWARM_MODELS`, `NEARAI_TEE_MODELS`, and measurement pin model keys
 accept a leading `nearai/` or `nearai_e2ee/` and strip it, so a user-facing name

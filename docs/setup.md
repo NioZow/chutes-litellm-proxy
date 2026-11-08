@@ -289,7 +289,8 @@ Each provider is a wildcard entry such as `openai/*`. At startup:
 - a wildcard provider with a key set is expanded by querying that provider's
   model API,
 - a provider without a key is skipped with a log line,
-- Chutes keeps only ids ending in `-TEE`,
+- Chutes keeps every chat model and records `confidential_compute` so only TEE
+  models use the E2EE transport,
 - fixed (non-wildcard) entries are copied through unchanged.
 
 The generated file is written to `LITELLM_OUTPUT` (default
@@ -408,28 +409,42 @@ curl -s http://127.0.0.1:4000/v1/chat/completions \
 
 Add `-H 'authorization: Bearer <master_key>'` when the template enables auth.
 
-opencode (`~/.config/opencode/opencode.jsonc`):
+opencode (`~/.config/opencode/opencode.json`, V2 shape):
 
 ```jsonc
-"provider": {
-  "litellm": {
-    "options": {
-      "baseURL": "http://127.0.0.1:4000/v1",
-      "type": "openai",
-      "apiKey": "dummy" // use the master key when auth is enabled
+{
+  "providers": {
+    "litellm": {
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:4000/v1",
+        "apiKey": "dummy" // use the master key when auth is enabled
+      }
     }
   }
 }
 ```
 
+Older V1 configs use the deprecated `provider` key with `options.baseURL`
+instead. `scripts/gen_opencode_models.py` understands both shapes.
+
 For Open WebUI, start the Compose stack and add `http://litellm:4000/v1` as an
-OpenAI connection. `scripts/gen_opencode_models.py` can write the per-model
-opencode block from the running proxy:
+OpenAI connection. OpenCode can also read the catalog dynamically: the proxy
+advertises every model through `/v1/model/info`, including the
+`<Model> (<Source>)` names in `model_info.display_name`. `scripts/gen_opencode_models.py`
+is an optional helper that materialises that catalog into a static config when
+the client cannot query it:
 
 ```sh
 uv run scripts/gen_opencode_models.py --chutes-api-key "$CHUTES_API_KEY"          # preview
 uv run scripts/gen_opencode_models.py --chutes-api-key "$CHUTES_API_KEY" --apply  # write
 ```
+
+`--apply` updates the first of `~/.config/opencode/opencode.json` and
+`opencode.jsonc` that exists, writes the V2 `providers.litellm.models` shape when
+the file already uses `providers`, and leaves every other key untouched. Use
+`--output PATH` to target a different file; that mode only refreshes models
+already listed in the file (add `--filter-current` to preview that subset).
 
 ### Reasoning and thinking
 

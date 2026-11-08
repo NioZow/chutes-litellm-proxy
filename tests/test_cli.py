@@ -381,3 +381,43 @@ def test_near_invalid_or_empty_generated_config_does_not_crash(
     assert recorder.order == ["install", "register_near", "serve"]
     assert "NEARAI_PREWARM_MODELS" not in os.environ
     assert "LITELLM_WORKER_STARTUP_HOOKS" not in os.environ
+
+
+def test_chutes_tee_flags_split_the_generated_catalog() -> None:
+    """The E2EE wiring needs the catalog's own TEE/non-TEE classification."""
+    config = {
+        "model_list": [
+            {
+                "model_name": "chutes/Qwen/Qwen3.8-27B-TEE",
+                "litellm_params": {"model": "chutes/Qwen/Qwen3.8-27B-TEE"},
+                "model_info": {"confidential_compute": True},
+            },
+            {
+                "model_name": "chutes/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+                "litellm_params": {"model": "chutes/deepseek-ai/DeepSeek-V4.1-Flash-1017"},
+                "model_info": {"confidential_compute": False},
+            },
+            # Unclassified entries fall back to the id suffix at request time.
+            {
+                "model_name": "chutes/legacy/Model-TEE",
+                "litellm_params": {"model": "chutes/legacy/Model-TEE"},
+            },
+            # Non-Chutes providers are never part of the classification.
+            {
+                "model_name": "nearai/Qwen/Qwen3.8-27B",
+                "litellm_params": {"model": "nearai_e2ee/Qwen/Qwen3.8-27B"},
+                "model_info": {"confidential_compute": True},
+            },
+        ]
+    }
+
+    tee, non_tee = cli._chutes_tee_flags(config)
+
+    assert tee == ["Qwen/Qwen3.8-27B-TEE"]
+    assert non_tee == ["deepseek-ai/DeepSeek-V4.1-Flash-1017"]
+
+
+def test_chutes_tee_flags_tolerates_malformed_config() -> None:
+    assert cli._chutes_tee_flags({}) == ([], [])
+    assert cli._chutes_tee_flags({"model_list": "nope"}) == ([], [])
+    assert cli._chutes_tee_flags({"model_list": [None, {}, {"model_name": "chutes/x"}]}) == ([], [])

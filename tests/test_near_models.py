@@ -208,6 +208,55 @@ def test_discover_models_propagates_fetch_failures(monkeypatch: pytest.MonkeyPat
 
 
 # ---------------------------------------------------------------------------
+# TEE classification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # NEAR's own attested vLLM deployments.
+        {"owned_by": "nearai"},
+        {"owned_by": "nearai", "providerType": "vllm", "attestationSupported": True},
+        {"owned_by": "nearai", "provider_type": "vllm", "attestation_supported": True},
+    ],
+)
+def test_is_tee_model_recognises_near_hosted_models(model: dict) -> None:
+    assert models.is_tee_model(model) is True
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Models NEAR only proxies, even when the upstream is itself attested.
+        {"owned_by": "attested 3p", "provider_type": "chutes", "attestation_supported": True},
+        {"owned_by": "attested 3p", "provider_type": "tinfoil", "attestation_supported": True},
+        {"owned_by": "anthropic", "provider_type": "external", "attestation_supported": False},
+        {"owned_by": "deepseek"},
+        {},
+    ],
+)
+def test_is_tee_model_rejects_proxied_models(model: dict) -> None:
+    assert models.is_tee_model(model) is False
+
+
+def test_is_tee_model_prefers_explicit_provider_metadata() -> None:
+    """Explicit metadata overrides the `owned_by` heuristic when both exist."""
+    assert (
+        models.is_tee_model(
+            {"owned_by": "nearai", "provider_type": "external", "attestation_supported": False}
+        )
+        is False
+    )
+    assert (
+        models.is_tee_model(
+            {"owned_by": "someone", "providerType": "vllm", "attestationSupported": True}
+        )
+        is True
+    )
+
+
+# ---------------------------------------------------------------------------
 # model_info normalisation
 # ---------------------------------------------------------------------------
 

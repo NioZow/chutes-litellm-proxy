@@ -6,22 +6,27 @@
 # ]
 # ///
 """
-Generate or update the models block in opencode.jsonc from LiteLLM's /model/info API.
+Generate or update the models block in an opencode config from LiteLLM's
+/model/info API.
 
 Strategy:
+  - Display names come from the proxy's `model_info.display_name` (written by
+    generate_config.py as "<Pretty Name> (<Source>)"), falling back to the id.
   - All boolean capability flags (tool_call, temperature, attachment, reasoning) are derived
     exclusively from LiteLLM's model_info fields — no keyword guessing, no hardcoded lists.
   - For models with no LiteLLM metadata (custom routes like chutes), all capabilities
     default to True (conservative: assume the model supports everything until proven otherwise).
   - Limits fall back in order: LiteLLM API → Chutes API → models.dev → existing config → hardcoded default.
-  - When --apply is used, the script rewrites only the provider.litellm.models block in
-    opencode.jsonc, preserving all other config untouched (agent temps, permissions, etc.)
+  - Both the V2 `providers.<id>.models` shape and the deprecated V1
+    `provider.<id>.models` shape are supported.
+  - When --apply is used, the script rewrites only the litellm models block in
+    the config, preserving all other config untouched (agent temps, permissions, etc.)
     and preserving any manually set "name" values.
 
 Usage:
   ./gen_opencode_models.py                          # print JSON models block, all available models
-  ./gen_opencode_models.py --filter-current         # only models already in opencode.jsonc
-  ./gen_opencode_models.py --apply                  # update opencode.jsonc in-place
+  ./gen_opencode_models.py --filter-current         # only models already in the config
+  ./gen_opencode_models.py --apply                  # update the default config in-place
   ./gen_opencode_models.py --output ~/opencode.json # update a plain JSON file in-place
   ./gen_opencode_models.py --debug                  # show why each model was skipped
   ./gen_opencode_models.py --url http://...         # custom LiteLLM base URL
@@ -41,7 +46,14 @@ import requests
 
 LITELLM_BASE = "http://127.0.0.1:27740"
 CHUTES_BASE = "https://llm.chutes.ai"
-OPENCODE_CONFIG = Path.home() / ".config/opencode/opencode.jsonc"
+OPENCODE_CONFIG_DIR = Path.home() / ".config/opencode"
+# V2 configs use `providers`, V1 configs use the deprecated `provider` key.
+# Prefer a plain .json file when both exist; --output overrides this.
+OPENCODE_CONFIG_CANDIDATES = (
+    OPENCODE_CONFIG_DIR / "opencode.json",
+    OPENCODE_CONFIG_DIR / "opencode.jsonc",
+)
+PROVIDER_ID = "litellm"
 
 FALLBACK_CONTEXT = 128000
 FALLBACK_OUTPUT = 8192
@@ -228,15 +240,37 @@ def strip_jsonc_comments(text: str) -> str:
     return text
 
 
+def default_config_path() -> Path | None:
+    """Return the first existing default opencode config, if any."""
+    for candidate in OPENCODE_CONFIG_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def provider_maps(cfg: dict):
+    """Yield ``(shape, providers)`` for the V2 and deprecated V1 config keys."""
+    for shape in ("providers", "provider"):
+        providers = cfg.get(shape)
+        if isinstance(providers, dict):
+            yield shape, providers
+
+
+def config_version(cfg: dict) -> int:
+    """Return 2 for a `providers` config, 1 for a `provider` config."""
+    return 2 if isinstance(cfg.get("providers"), dict) else 1
+
+
 def load_opencode_config(path: Path | None = None) -> tuple[dict, dict[str, str]]:
     """
     Parse an opencode config file (.json or .jsonc) and return
     (full_config_dict, model_id -> name overrides).
-    Falls back to the default OPENCODE_CONFIG path when none is given.
-    Returns ({}, {}) if the file doesn't exist or can't be parsed.
+    Understands both the V2 `providers` shape and the deprecated `provider`
+    shape. Falls back to the first default config path when none is given.
+    Returns ({}, {}) if no file exists or it can't be parsed.
     """
-    target = path or OPENCODE_CONFIG
-    if not target.exists():
+    target = path or default_config_path()
+    if target is None or not target.exists():
         return {}, {}
     raw = target.read_text()
     try:
@@ -247,8 +281,9 @@ def load_opencode_config(path: Path | None = None) -> tuple[dict, dict[str, str]
         print(f"Warning: could not parse {target}: {e}", file=sys.stderr)
         return {}, {}
     name_overrides: dict[str, str] = {}
-    for provider_cfg in cfg.get("provider", {}).values():
-        for mid, mdef in provider_cfg.get("models", {}).items():
+    for _shape, providers in provider_maps(cfg):
+        provider_cfg = providers.get(PROVIDER_ID) or {}
+        for mid, mdef in (provider_cfg.get("models") or {}).items():
             if "name" in mdef:
                 name_overrides[mid] = mdef["name"]
     return cfg, name_overrides
@@ -257,8 +292,9 @@ def load_opencode_config(path: Path | None = None) -> tuple[dict, dict[str, str]
 def load_current_model_ids(path: Path | None = None) -> set[str]:
     cfg, _ = load_opencode_config(path)
     ids: set[str] = set()
-    for p in cfg.get("provider", {}).values():
-        ids.update(p.get("models", {}).keys())
+    for _shape, providers in provider_maps(cfg):
+        provider_cfg = providers.get(PROVIDER_ID) or {}
+        ids.update((provider_cfg.get("models") or {}).keys())
     return ids
 
 
@@ -370,7 +406,10 @@ def build_entry(
         output = FALLBACK_OUTPUT
 
     entry: dict = {
-        "name": guess_display_name(model_id),
+        # The proxy publishes `<Pretty Name> (<Source>)` in model_info so the
+        # picker still shows which backend serves a model under the single
+        # `litellm` provider. Fall back to the id for older proxies.
+        "name": info.get("display_name") or guess_display_name(model_id),
         "tool_call": tool_call,
         "temperature": temperature,
     }
@@ -407,6 +446,68 @@ def build_entry(
     return entry
 
 
+def to_v2_entry(entry: dict) -> dict:
+    """Convert a legacy-shaped model entry to the V2 Config.ModelEncoded shape.
+
+    V2 (`providers.<id>.models`) nests capability flags under `capabilities`,
+    uses camelCase `releaseDate`, models variants as an array, and expresses
+    the reasoning field through `compatibility.reasoningField`.
+    """
+    v2: dict = {"name": entry["name"]}
+
+    if entry.get("release_date"):
+        v2["releaseDate"] = entry["release_date"]
+
+    capabilities: dict = {}
+    if "tool_call" in entry:
+        capabilities["tools"] = entry["tool_call"]
+    modalities = entry.get("modalities") or {}
+    if modalities.get("input"):
+        capabilities["input"] = modalities["input"]
+    if modalities.get("output"):
+        capabilities["output"] = modalities["output"]
+    if entry.get("temperature") is not None:
+        capabilities["temperature"] = entry["temperature"]
+    if entry.get("reasoning"):
+        capabilities["reasoning"] = {"supported": True}
+    if capabilities:
+        v2["capabilities"] = capabilities
+
+    if entry.get("limit"):
+        v2["limit"] = {
+            "context": entry["limit"]["context"],
+            "output": entry["limit"]["output"],
+        }
+
+    cost = entry.get("cost")
+    if cost:
+        converted_cost: dict = {
+            "input": cost.get("input") or 0,
+            "output": cost.get("output") or 0,
+        }
+        cache = {
+            "read": cost.get("cache_read") or 0,
+            "write": cost.get("cache_write") or 0,
+        }
+        if cache["read"] or cache["write"]:
+            converted_cost["cache"] = cache
+        v2["cost"] = converted_cost
+
+    variants = entry.get("variants")
+    if variants:
+        v2["variants"] = [
+            {"id": level, "body": body} for level, body in variants.items()
+        ]
+
+    interleaved = entry.get("interleaved")
+    if interleaved:
+        field = interleaved if isinstance(interleaved, str) else interleaved.get("field")
+        if field:
+            v2["compatibility"] = {"reasoningField": field}
+
+    return v2
+
+
 def is_skippable(info: dict, in_current: bool) -> bool | str:
     """
     Return False if the model should be included, or a reason string if it should be skipped.
@@ -435,6 +536,7 @@ def build_models_block(
     filter_current: bool,
     debug: bool = False,
     chutes_map: dict[str, dict] | None = None,
+    v2: bool = False,
 ) -> dict[str, dict]:
     # Build ordered deduplicated list: metadata-known models first, then extras
     seen: set[str] = set()
@@ -475,83 +577,131 @@ def build_models_block(
         # Restore manually set name if present
         if mid in name_overrides:
             entry["name"] = name_overrides[mid]
-        result[mid] = entry
+        result[mid] = to_v2_entry(entry) if v2 else entry
 
     if skipped:
         print(f"Skipped {skipped} non-chat/no-tool-call models", file=sys.stderr)
     return result
 
 
-def apply_to_config(models_block: dict[str, dict]) -> None:
-    """
-    Rewrite only the provider.litellm.models section of opencode.jsonc.
-    All other config (agent, permissions, etc.) is preserved verbatim.
-    The raw file text is rebuilt by replacing just the models block so that
-    comments and formatting outside that section are kept intact.
-    """
-    raw = OPENCODE_CONFIG.read_text()
-
-    # Serialise the models block with consistent indentation (8 spaces = 2 levels of 4)
-    models_json = json.dumps(models_block, indent=8)
-    # Shift to match the file's 2-space indent style (collapse 8→4→2... not needed,
-    # just use 2-space indent relative to the "models" key which is at 6 spaces)
-    # We'll embed it verbatim — the leading/trailing braces are part of the replacement.
-
-    # Pattern: "models": { ... } inside the litellm provider block
-    # We match from `"models": {` to the matching closing `}` by counting braces.
-    # Since regex can't count braces, we do it manually.
-    marker = '"models":'
-    start = raw.find(marker)
-    if start == -1:
-        print("Error: could not find models block in config", file=sys.stderr)
-        sys.exit(1)
-
-    # Find the opening brace
-    brace_start = raw.index("{", start)
+def _find_object_span(text: str, start: int) -> tuple[int, int]:
+    """Return the (open, close) brace indices of the object at/after start."""
+    open_idx = text.index("{", start)
     depth = 0
-    i = brace_start
-    while i < len(raw):
-        if raw[i] == "{":
+    in_string = False
+    escaped = False
+    for idx in range(open_idx, len(text)):
+        char = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
             depth += 1
-        elif raw[i] == "}":
+        elif char == "}":
             depth -= 1
             if depth == 0:
-                brace_end = i
-                break
-        i += 1
+                return open_idx, idx
+    raise ValueError("unbalanced braces")
+
+
+def _line_indent(text: str, index: int) -> str:
+    """Return the leading whitespace of the line containing ``index``."""
+    line_start = text.rfind("\n", 0, index) + 1
+    return re.match(r"[ \t]*", text[line_start:]).group(0)
+
+
+def _indent_continuation(value: str, indent: str) -> str:
+    """Indent every line but the first, which is already positioned in the file."""
+    lines = value.splitlines()
+    if len(lines) < 2:
+        return value
+    return "\n".join(
+        [lines[0]]
+        + [indent + line if line.strip() else line for line in lines[1:]]
+    )
+
+
+def _replace_models_block(
+    raw: str, shape: str, models_block: dict[str, dict]
+) -> str | None:
+    """Surgically replace/insert a models block, keeping the rest of the text."""
+    shape_match = re.search(rf'"{re.escape(shape)}"\s*:', raw)
+    if not shape_match:
+        return None
+    shape_open, shape_close = _find_object_span(raw, shape_match.end())
+    provider_match = re.search(
+        rf'"{re.escape(PROVIDER_ID)}"\s*:', raw[shape_open:shape_close]
+    )
+    if not provider_match:
+        return None
+    provider_key_index = shape_open + provider_match.start()
+    provider_open, provider_close = _find_object_span(raw, shape_open + provider_match.end())
+
+    models_json = json.dumps(models_block, indent=2)
+    models_match = re.search(r'"models"\s*:', raw[provider_open:provider_close])
+    if models_match:
+        key_index = provider_open + models_match.start()
+        indent = _line_indent(raw, key_index)
+        obj_open, obj_close = _find_object_span(raw, provider_open + models_match.end())
+        return (
+            raw[:obj_open]
+            + _indent_continuation(models_json, indent)
+            + raw[obj_close + 1 :]
+        )
+
+    # No models key yet: insert one right after the provider's opening brace.
+    # Adding the member first avoids having to place a comma before a possible
+    # trailing `// comment` on the previous last member.
+    key_indent = _line_indent(raw, provider_key_index) + "  "
+    has_members = bool(raw[provider_open + 1 : provider_close].strip())
+    insertion = (
+        "\n"
+        + key_indent
+        + '"models": '
+        + _indent_continuation(models_json, key_indent)
+        + ("," if has_members else "")
+    )
+    return raw[: provider_open + 1] + insertion + raw[provider_open + 1 :]
+
+
+def apply_to_config(path: Path, models_block: dict[str, dict]) -> None:
+    """Update ``providers.litellm.models`` (V2) or ``provider.litellm.models``.
+
+    Plain JSON files are parsed and rewritten, which preserves every key but
+    normalises formatting. Files that are not valid JSON (JSONC, or JSON with
+    comments) are edited surgically so comments and formatting outside the
+    models block survive.
+    """
+    raw = path.read_text()
+    try:
+        cfg = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            cfg = json.loads(strip_jsonc_comments(raw))
+        except json.JSONDecodeError as exc:
+            print(f"Error: could not parse {path}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        shape = "providers" if isinstance(cfg.get("providers"), dict) else "provider"
+        new_raw = _replace_models_block(raw, shape, models_block)
+        if new_raw is None:
+            print(
+                f"Error: could not find {shape}.{PROVIDER_ID} in {path}; "
+                "add that provider first",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        path.write_text(new_raw)
     else:
-        print("Error: unbalanced braces in models block", file=sys.stderr)
-        sys.exit(1)
-
-    # Build the indented models JSON (6 spaces for "models" key level → content at 8+)
-    lines = models_json.splitlines()
-    indented_lines = []
-    for idx, line in enumerate(lines):
-        if idx == 0:
-            indented_lines.append("      " + line)  # opening { at 6-space indent
-        else:
-            # Replace the 8-space base indent from json.dumps with the file's style
-            stripped = line.lstrip()
-            leading = len(line) - len(stripped)
-            # Map json.dumps indent levels (multiples of 8) to file's 2-space style at 6+base
-            depth_level = leading // 8
-            new_indent = "      " + "  " * depth_level  # 6 base + 2 per level
-            indented_lines.append(new_indent + stripped)
-    new_models_json = "\n".join(indented_lines)
-
-    new_raw = raw[:brace_start] + new_models_json + raw[brace_end + 1 :]
-    OPENCODE_CONFIG.write_text(new_raw)
-    print(f"Updated {OPENCODE_CONFIG}", file=sys.stderr)
-
-
-def apply_to_json(path: Path, models_block: dict[str, dict]) -> None:
-    """
-    Update provider.litellm.models in a plain JSON opencode config file.
-    All other keys (model, agent, permission, etc.) are preserved exactly.
-    """
-    cfg = json.loads(path.read_text())
-    cfg.setdefault("provider", {}).setdefault("litellm", {})["models"] = models_block
-    path.write_text(json.dumps(cfg, indent=2) + "\n")
+        shape = "providers" if isinstance(cfg.get("providers"), dict) else "provider"
+        cfg.setdefault(shape, {}).setdefault(PROVIDER_ID, {})["models"] = models_block
+        path.write_text(json.dumps(cfg, indent=2) + "\n")
     print(f"Updated {path}", file=sys.stderr)
 
 
@@ -563,17 +713,18 @@ def main():
     parser.add_argument(
         "--filter-current",
         action="store_true",
-        help="Only include models already in opencode.jsonc",
+        help="Only include models already in the opencode config",
     )
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Write the result directly into opencode.jsonc (preserves all other config)",
+        help="Write the result into the default opencode config (opencode.json or "
+        "opencode.jsonc), creating a models block for the litellm provider",
     )
     parser.add_argument(
         "--output",
         metavar="PATH",
-        help="Path to an opencode.json file; update its provider.litellm.models in-place "
+        help="Path to an opencode config; update its litellm models in-place "
         "(only models already in the file are regenerated)",
     )
     parser.add_argument(
@@ -590,6 +741,16 @@ def main():
     args = parser.parse_args()
 
     output_path = Path(args.output) if args.output else None
+    target_path = output_path
+    if target_path is None and args.apply:
+        target_path = default_config_path()
+        if target_path is None:
+            print(
+                "Error: no opencode config found at "
+                + " or ".join(str(p) for p in OPENCODE_CONFIG_CANDIDATES),
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     print(f"Fetching model info from {args.url}...", file=sys.stderr)
     try:
@@ -605,15 +766,20 @@ def main():
         chutes_map = fetch_chutes_model_info(args.chutes_api_key)
         print(f"  Got {len(chutes_map)} Chutes models", file=sys.stderr)
 
-    config_path = output_path if output_path else None
-    cfg, name_overrides = load_opencode_config(config_path)
+    cfg, name_overrides = load_opencode_config(target_path)
+    v2 = config_version(cfg) == 2
     current_ids: set[str] = set()
     existing_models: dict[str, dict] = {}
-    for p in cfg.get("provider", {}).values():
-        current_ids.update(p.get("models", {}).keys())
-        existing_models.update(p.get("models", {}))
+    for _shape, providers in provider_maps(cfg):
+        provider_cfg = providers.get(PROVIDER_ID) or {}
+        models = provider_cfg.get("models") or {}
+        current_ids.update(models.keys())
+        existing_models.update(models)
 
-    filter_current = args.filter_current or args.apply or bool(output_path)
+    # --apply regenerates every discovered model so a config with no litellm
+    # models yet (the usual V2 case) can be bootstrapped. --output keeps the
+    # historical behaviour of only refreshing models already in the file.
+    filter_current = args.filter_current or bool(output_path)
     if filter_current:
         print(
             f"Using {len(current_ids)} models from current opencode config",
@@ -629,13 +795,15 @@ def main():
         filter_current=filter_current,
         debug=args.debug,
         chutes_map=chutes_map,
+        v2=v2,
     )
-    print(f"Generated {len(models_block)} model entries", file=sys.stderr)
+    print(
+        f"Generated {len(models_block)} {'V2' if v2 else 'V1'} model entries",
+        file=sys.stderr,
+    )
 
-    if output_path:
-        apply_to_json(output_path, models_block)
-    elif args.apply:
-        apply_to_config(models_block)
+    if target_path:
+        apply_to_config(target_path, models_block)
     else:
         print(json.dumps(models_block, indent=2))
 

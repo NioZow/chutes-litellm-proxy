@@ -115,9 +115,11 @@ model list, and emits one concrete entry per model:
 Important behaviours:
 
 - Providers without a key are skipped, not fatal.
-- Chutes keeps only ids ending in `-TEE` and adds `model_info` capability fields
-  and the context limit used by opencode. Output limits are reported as `0` so
-  clients use their own default.
+- Chutes keeps every chat model and adds `model_info` capability fields and the
+  context limit used by opencode. Output limits are reported as `0` so clients
+  use their own default. TEE deployments (`confidential_compute`) are labelled
+  `(Chutes TEE)` and use the E2EE transport; plain models are labelled
+  `(Chutes)` and are forwarded normally.
 - Chutes entries also get `allowed_openai_params` so thinking/reasoning
   parameters are forwarded instead of dropped.
 - NEAR AI entries keep the user-facing `nearai/<id>` name but set

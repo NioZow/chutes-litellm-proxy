@@ -235,6 +235,23 @@ def _supports_vision(model: dict) -> bool:
     return "image" in {item.lower() for item in _input_modalities(model)}
 
 
+def is_tee_model(model: dict) -> bool:
+    """Return whether a NEAR AI catalog entry runs on NEAR's own TEE hardware.
+
+    True TEE models are ``provider_type == "vllm"`` with attestation support
+    and are published as ``owned_by: "nearai"``.  Models NEAR merely proxies
+    (``attested 3p`` or the upstream vendor) return ``False``: they are
+    end-to-end encrypted elsewhere, not on NEAR's servers.
+    """
+    provider_type = model.get("provider_type") or model.get("providerType")
+    attested = model.get("attestation_supported")
+    if attested is None:
+        attested = model.get("attestationSupported")
+    if isinstance(provider_type, str) and isinstance(attested, bool):
+        return provider_type == "vllm" and attested
+    return model.get("owned_by") == "nearai"
+
+
 def normalized_model_info(model: dict) -> dict:
     """Build a LiteLLM ``model_info`` block from a NEAR AI catalog entry.
 
@@ -286,5 +303,6 @@ __all__ = [
     "discover_models",
     "fetch_models",
     "is_chat_model",
+    "is_tee_model",
     "normalized_model_info",
 ]

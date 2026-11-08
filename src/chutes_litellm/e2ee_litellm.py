@@ -6,24 +6,26 @@ generic OpenAI-SDK code path (``OpenAIChatCompletion``).  That code path builds
 its sync/async OpenAI clients from two class-level factories,
 ``BaseOpenAILLM._get_sync_http_client()`` and ``_get_async_http_client()``.
 
-Instead of shipping a bespoke LiteLLM provider (the old ``chutes_provider.py``
+instead of shipping a bespoke LiteLLM provider (the old ``chutes_provider.py``
 approach), this module *swaps those two factories* for shared ``httpx`` clients
 whose transport is the Chutes E2EE transport (ML-KEM-768 + ChaCha20-Poly1305)
-for requests addressed to Chutes hosts, and a plain passthrough transport for
-every other host.  The result:
+for TEE models addressed to Chutes hosts, and a plain passthrough transport for
+plain Chutes deployments and every other host.  The result:
 
   * native ``chutes`` provider semantics (param validation, transforms,
     streaming, usage, retries — all maintained upstream);
-  * end-to-end encryption only where it belongs (the fixed
+  * end-to-end encryption only where it belongs (TEE models on the fixed
     ``https://llm.chutes.ai`` / ``https://api.chutes.ai`` hosts);
   * works through the Router / proxy YAML config: no client objects need to be
     embedded in ``model_list``.
 
-Every request to a Chutes host is end-to-end encrypted and runs the
-:mod:`chutes_litellm.attestation` gate, which refuses to encrypt to an instance
-whose TDX/GPU attestation evidence does not verify (fail closed).  Attestation,
-NVIDIA GPU verification and TLS verification are always on and cannot be
-disabled.
+Requests for TEE models run the :mod:`chutes_litellm.attestation` gate, which
+refuses to encrypt to an instance whose TDX/GPU attestation evidence does not
+verify (fail closed).  Attestation, NVIDIA GPU verification and TLS
+verification are always on and cannot be disabled.  Plain Chutes models are not
+confidential-compute deployments: they have no E2EE instance key, so they are
+forwarded unmodified (the model id is classified at startup from the catalog's
+``confidential_compute`` flag).
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ import inspect
 import json
 import os
 import threading
+from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -197,10 +200,11 @@ class _ChutesScopedTransport(httpx.BaseTransport):
         # must not be able to substitute a different key for the same id.
         return [inst for inst in instances if verified.get(inst.instance_id) == getattr(inst, "e2e_pubkey", None)]
 
-    def _verify_request(self, request: httpx.Request) -> None:
+    def _verify_request(self, request: httpx.Request, model: str | None = None) -> None:
         from .attestation import AttestationError, verify_model
 
-        model = _json_model(request.content)
+        if model is None:
+            model = _json_model(request.content)
         if model is None:
             return
         from chutes_litellm import get_logger
@@ -215,8 +219,12 @@ class _ChutesScopedTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.host.lower() in self._hosts:
-            self._verify_request(request)
-            return self._transport.handle_request(request)
+            model = _json_model(request.content)
+            # Only TEE models are encrypted; plain Chutes deployments share
+            # the host but have no E2EE instance/key and must pass through.
+            if is_e2ee_model(model):
+                self._verify_request(request)
+                return self._transport.handle_request(request)
         return self._inner.handle_request(request)
 
     def close(self) -> None:
@@ -271,12 +279,13 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
         # must not be able to substitute a different key for the same id.
         return [inst for inst in instances if verified.get(inst.instance_id) == getattr(inst, "e2e_pubkey", None)]
 
-    async def _verify_request(self, request: httpx.Request) -> None:
+    async def _verify_request(self, request: httpx.Request, model: str | None = None) -> None:
         import asyncio
 
         from .attestation import AttestationError, verify_model
 
-        model = _json_model(request.content)
+        if model is None:
+            model = _json_model(request.content)
         if model is None:
             return
         from chutes_litellm import get_logger
@@ -291,8 +300,10 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.host.lower() in self._hosts:
-            await self._verify_request(request)
-            return await self._transport.handle_async_request(request)
+            model = _json_model(request.content)
+            if is_e2ee_model(model):
+                await self._verify_request(request)
+                return await self._transport.handle_async_request(request)
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:
@@ -309,6 +320,55 @@ _clients: dict[str, httpx.Client] = {}
 _aclients: dict[str, httpx.AsyncClient] = {}
 _patched = False
 _originals: dict[str, Any] = {}
+
+# Exact TEE/non-TEE classification from the generated config (Chutes publishes
+# `confidential_compute`).  The `-TEE` suffix is the fallback for request paths
+# that bypass config generation (tests, ad-hoc clients).
+_tee_models: frozenset[str] = frozenset()
+_non_tee_models: frozenset[str] = frozenset()
+
+
+def configure_tee_models(
+    tee: Iterable[str] = (), non_tee: Iterable[str] = ()
+) -> None:
+    """Record which bare Chutes model ids require end-to-end encryption.
+
+    Non-TEE models (``confidential_compute: false``) must be sent in plaintext;
+    wrapping them in the E2EE transport fails because no instance advertises an
+    encryption key for them.  The sets are built at startup from the generated
+    config; without them the ``-TEE`` id suffix decides.
+    """
+    global _tee_models, _non_tee_models
+    _tee_models = frozenset(item for item in tee if item)
+    _non_tee_models = frozenset(item for item in non_tee if item)
+
+
+def _bare_chutes_model(model: str | None) -> str | None:
+    """Strip a ``chutes/`` or ``chutes_e2ee/`` provider prefix from *model*."""
+    if not isinstance(model, str) or not model.strip():
+        return None
+    cleaned = model.strip()
+    for prefix in ("chutes_e2ee/", "chutes/"):
+        if cleaned.startswith(prefix):
+            return cleaned[len(prefix):]
+    return cleaned
+
+
+def is_e2ee_model(model: str | None) -> bool:
+    """Return whether *model* must go through the E2EE transport.
+
+    Explicit non-TEE classification wins over the suffix so a future TEE
+    deployment without ``-TEE`` in its id still gets encrypted when the catalog
+    marks it ``confidential_compute``.
+    """
+    bare = _bare_chutes_model(model)
+    if not bare:
+        return False
+    if bare in _non_tee_models:
+        return False
+    if bare in _tee_models:
+        return True
+    return bare.upper().endswith("-TEE")
 
 
 def _api_key() -> str | None:

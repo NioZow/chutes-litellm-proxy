@@ -16,6 +16,7 @@ def _chutes_model(**overrides) -> dict:
         "output_modalities": ["text"],
         "supported_sampling_parameters": ["temperature", "top_p"],
         "created": 1700000000,
+        "confidential_compute": True,
     }
     model.update(overrides)
     return model
@@ -167,6 +168,189 @@ def test_nearai_wildcard_skips_on_discovery_error(monkeypatch):
     )
 
     assert generate_config.expand_wildcard("nearai", {"model_name": "nearai/*"}) == []
+
+
+# ---------------------------------------------------------------------------
+# Display names and direct-provider metadata
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model_name", "expected"),
+    [
+        ("chutes/mistralai/Mistral-Large-4-TEE", "Mistral Large 4 (Chutes TEE)"),
+        ("chutes/deepseek-ai/DeepSeek-V3.2-TEE", "DeepSeek V3.2 (Chutes TEE)"),
+        ("chutes/Qwen/Qwen3.8-27B", "Qwen3.8 27B (Chutes)"),
+        ("chutes/deepseek-ai/DeepSeek-V4.1-Flash-1017", "DeepSeek V4.1 Flash 1017 (Chutes)"),
+        ("chutes/Qwen/Qwen3.5-397B-A17B-TEE", "Qwen3.5 397B A17B (Chutes TEE)"),
+        ("chutes/google/gemma-4-31B-turbo-TEE", "Gemma 4 31B Turbo (Chutes TEE)"),
+        ("nearai/anthropic/claude-sonnet-5", "Claude Sonnet 5 (NEAR)"),
+        ("nearai/Qwen/Qwen3.8-27B", "Qwen3.8 27B (NEAR)"),
+        ("deepseek/deepseek-flash", "DeepSeek Flash (DeepSeek)"),
+        ("mistral/mistral-large-4", "Mistral Large 4 (Mistral)"),
+        ("gemini/gemini-3.1-pro", "Gemini 3.1 Pro (Google)"),
+        ("openai/gpt-5.2", "GPT 5.2 (OpenAI)"),
+        ("xai/grok-4", "Grok 4 (xAI)"),
+        ("anthropic/claude-opus-4-5", "Claude Opus 4.5 (Anthropic)"),
+        ("anthropic/claude-opus-4-5-20251101", "Claude Opus 4.5 20251101 (Anthropic)"),
+        ("openai/gpt-4.1-2025-04-14", "GPT 4.1 2025 04 14 (OpenAI)"),
+    ],
+)
+def test_build_display_name_labels_the_upstream_source(model_name: str, expected: str):
+    """Display names carry the source even though all models share one provider."""
+    assert generate_config.build_display_name(model_name) == expected
+
+
+def test_near_tee_and_catalog_names_are_used():
+    """NEAR's own TEE models get the badge and the catalog's display name."""
+    assert (
+        generate_config.build_display_name(
+            "nearai/Qwen/Qwen3.8-27B", tee=True, name="Qwen 3.8 27B"
+        )
+        == "Qwen 3.8 27B (NEAR TEE)"
+    )
+    # Proxied models keep no TEE badge even though they are encrypted upstream.
+    assert (
+        generate_config.build_display_name(
+            "nearai/deepseek/deepseek-v3.2", tee=False, name="deepseek-v3.2"
+        )
+        == "DeepSeek V3.2 (NEAR)"
+    )
+
+
+def test_generated_entries_include_a_display_name(monkeypatch):
+    """Wildcard expansion annotates the model_info LiteLLM passes through."""
+    monkeypatch.setenv("CHUTES_API_KEY", "cpk_test")
+    monkeypatch.setitem(
+        generate_config.PROVIDERS["chutes"],
+        "fetch",
+        lambda _api_key: [_chutes_model()],
+    )
+
+    info = generate_config.expand_wildcard("chutes", {"model_name": "chutes/*"})[0]["model_info"]
+
+    assert info["display_name"] == "DeepSeek V3.2 (Chutes TEE)"
+    assert info["confidential_compute"] is True
+
+
+def test_chutes_non_tee_models_are_generated_without_the_badge(monkeypatch):
+    """Plain Chutes deployments are exposed too, labelled just `(Chutes)`."""
+    monkeypatch.setenv("CHUTES_API_KEY", "cpk_test")
+    monkeypatch.setitem(
+        generate_config.PROVIDERS["chutes"],
+        "fetch",
+        lambda _api_key: [
+            _chutes_model(
+                id="deepseek-ai/DeepSeek-V4.1-Flash-1017", confidential_compute=False
+            )
+        ],
+    )
+
+    entry = generate_config.expand_wildcard("chutes", {"model_name": "chutes/*"})[0]
+
+    assert entry["model_name"] == "chutes/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    assert entry["model_info"]["display_name"] == "DeepSeek V4.1 Flash 1017 (Chutes)"
+    assert entry["model_info"]["confidential_compute"] is False
+
+
+def test_chutes_discovery_keeps_non_tee_chat_models():
+    """Almost every Chutes model is non-TEE now, so discovery must keep them."""
+    model = _chutes_model(confidential_compute=False)
+
+    assert generate_config._is_chat_chutes_model(model) is True
+
+    for non_chat in ("Qwen/Qwen3-Embedding-8B", "BAAI/bge-reranker-v2", "openai/whisper"):
+        assert generate_config._is_chat_chutes_model({"id": non_chat}) is False
+
+
+def test_nearai_wildcard_marks_only_own_tee_models(monkeypatch):
+    """`owned_by: nearai` is TEE; proxied models only get `(NEAR)`."""
+    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+    monkeypatch.setitem(
+        generate_config.PROVIDERS["nearai"],
+        "fetch",
+        lambda _api_key: [
+            _near_model(owned_by="nearai", name="Qwen 3.8 27B"),
+            _near_model(
+                id="deepseek/deepseek-v3.2",
+                owned_by="attested 3p",
+                name="deepseek-v3.2",
+            ),
+        ],
+    )
+
+    entries = generate_config.expand_wildcard("nearai", {"model_name": "nearai/*"})
+
+    assert entries[0]["model_info"]["display_name"] == "Qwen 3.8 27B (NEAR TEE)"
+    assert entries[1]["model_info"]["display_name"] == "DeepSeek V3.2 (NEAR)"
+
+
+def test_direct_provider_gets_known_limits_and_display_name(monkeypatch):
+    """DeepSeek models newer than LiteLLM's model map get their real 1M window."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk_test")
+    monkeypatch.setitem(
+        generate_config.PROVIDERS["deepseek"],
+        "fetch",
+        lambda _api_key: ["deepseek-flash", "deepseek-v4-pro"],
+    )
+
+    entries = generate_config.expand_wildcard("deepseek", {"model_name": "deepseek/*"})
+
+    assert [entry["model_name"] for entry in entries] == [
+        "deepseek/deepseek-flash",
+        "deepseek/deepseek-v4-pro",
+    ]
+    for entry in entries:
+        info = entry["model_info"]
+        assert info["max_input_tokens"] == 1_048_576
+        assert info["max_output_tokens"] == 393_216
+        assert info["supports_reasoning"] is True
+        assert info["mode"] == "chat"
+    assert entries[0]["model_info"]["display_name"] == "DeepSeek Flash (DeepSeek)"
+    assert entries[1]["model_info"]["supports_vision"] is False
+
+
+def test_unknown_direct_model_gets_only_a_display_name(monkeypatch):
+    """Models without a metadata entry are not given invented limits."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk_test")
+    monkeypatch.setitem(
+        generate_config.PROVIDERS["deepseek"],
+        "fetch",
+        lambda _api_key: ["deepseek-unreleased"],
+    )
+
+    info = generate_config.expand_wildcard("deepseek", {"model_name": "deepseek/*"})[0]["model_info"]
+
+    assert info == {"display_name": "DeepSeek Unreleased (DeepSeek)"}
+
+
+def test_generate_annotates_fixed_entries_and_preserves_explicit_names(tmp_path, monkeypatch):
+    """Fixed prompt entries get a name too, unless the user set one already."""
+    template = tmp_path / "template.yml"
+    template.write_text(
+        """
+model_list:
+  - model_name: "anthropic/claude-sonnet-5"
+    litellm_params:
+      model: "anthropic/claude-sonnet-5"
+      api_key: "os.environ/ANTHROPIC_API_KEY"
+  - model_name: "mistral/mistral-large-4"
+    litellm_params:
+      model: "mistral/mistral-large-4"
+      api_key: "os.environ/MISTRAL_API_KEY"
+    model_info:
+      display_name: "My Mistral"
+"""
+    )
+    output = tmp_path / "config.generated.yml"
+
+    generate_config.generate(template=str(template), output=str(output))
+
+    import yaml
+
+    config = yaml.safe_load(output.read_text())
+    assert config["model_list"][0]["model_info"]["display_name"] == "Claude Sonnet 5 (Anthropic)"
+    assert config["model_list"][1]["model_info"]["display_name"] == "My Mistral"
 
 
 # ---------------------------------------------------------------------------
