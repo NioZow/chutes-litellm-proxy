@@ -311,6 +311,31 @@ def test_chutes_transport_uses_library_env_proxy_default(monkeypatch):
     asyncio.run(async_transport.aclose())
 
 
+def test_plain_passthrough_uses_library_env_proxy_default(monkeypatch):
+    """Regression: non-E2EE passthrough must honour HTTP(S)_PROXY too.
+
+    The deployed guest has no direct egress: a bare ``httpx.HTTPTransport``
+    cannot resolve hosts and plain Chutes models failed with
+    ``ChutesException - Connection error``.  Both the encrypted and the plain
+    transport must come from ``chutes-e2ee``'s env-aware defaults.
+    """
+    import chutes_e2ee.transport as ct
+
+    from chutes_litellm import e2ee_litellm as el
+
+    sync_sentinel = httpx.HTTPTransport()
+    async_sentinel = httpx.AsyncHTTPTransport()
+    monkeypatch.setattr(ct, "_default_transport", lambda: sync_sentinel)
+    monkeypatch.setattr(ct, "_default_async_transport", lambda: async_sentinel)
+
+    sync_transport = el._ChutesScopedTransport("cpk_proxy", hosts={"h"})
+    async_transport = el._ChutesScopedAsyncTransport("cpk_proxy", hosts={"h"})
+    assert sync_transport._inner is sync_sentinel
+    assert async_transport._inner is async_sentinel
+    sync_transport.close()
+    asyncio.run(async_transport.aclose())
+
+
 def test_preflight_rejects_transport_without_instance_filter(monkeypatch):
     """The hook is mandatory, so a transport lacking it must be refused."""
     from chutes_litellm import e2ee_litellm as el

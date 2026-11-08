@@ -125,6 +125,29 @@ def _json_model(body: bytes) -> str | None:
     return data.get("model")
 
 
+def _passthrough_transport() -> httpx.BaseTransport:
+    """Build the plain transport for non-E2EE requests.
+
+    A bare ``httpx.HTTPTransport()`` never consults ``HTTP(S)_PROXY``: httpx
+    only applies environment proxies when a *client* owns its transport, and a
+    client built with an explicit transport opts out (``allow_env_proxies`` is
+    false).  Hardened deployments give the proxy guest no direct egress, so
+    plain Chutes models resolved to a DNS timeout and surfaced as
+    ``ChutesException - Connection error``.  Reuse ``chutes-e2ee``'s default
+    inner transport, which already honours ``HTTP(S)_PROXY`` and ``NO_PROXY``.
+    """
+    from chutes_e2ee.transport import _default_transport
+
+    return _default_transport()
+
+
+def _passthrough_async_transport() -> httpx.AsyncBaseTransport:
+    """Async counterpart of :func:`_passthrough_transport`."""
+    from chutes_e2ee.transport import _default_async_transport
+
+    return _default_async_transport()
+
+
 def _attestation_failure(model: str, exc: Exception) -> Exception:
     """Wrap a failed attestation in a typed LiteLLM error.
 
@@ -166,11 +189,9 @@ class _ChutesScopedTransport(httpx.BaseTransport):
         self._e2e_api_base = endpoints.API_BASE
         self._models_base = endpoints.MODELS_BASE
         self._api_key_provider = api_key_provider
-        # The passthrough path stays direct; the Chutes path must use the
-        # library's default inner transport so HTTP(S)_PROXY / NO_PROXY are
-        # honoured.  Supplying a bare transport here bypasses the proxy that
-        # hardened deployments require and makes discovery time out.
-        self._inner = httpx.HTTPTransport(verify=True)
+        # Both paths must honour HTTP(S)_PROXY / NO_PROXY: the deployment has
+        # no direct egress.  See `_passthrough_transport`.
+        self._inner = _passthrough_transport()
         self._transport = _SyncCls(
             api_key=api_key,
             api_base=self._e2e_api_base,
@@ -251,9 +272,8 @@ class _ChutesScopedAsyncTransport(httpx.AsyncBaseTransport):
         self._e2e_api_base = endpoints.API_BASE
         self._models_base = endpoints.MODELS_BASE
         self._api_key_provider = api_key_provider
-        # As above: omit `inner` so chutes-e2ee builds the env-proxy-aware
-        # transport for the E2EE discovery and invoke calls.
-        self._inner = httpx.AsyncHTTPTransport(verify=True)
+        # As above: both paths must honour the deployment's proxy.
+        self._inner = _passthrough_async_transport()
         self._transport = _AsyncCls(
             api_key=api_key,
             api_base=self._e2e_api_base,
