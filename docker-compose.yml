@@ -19,6 +19,14 @@ services:
       - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
       - XAI_API_KEY=${XAI_API_KEY:-}
       - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
+      - NEARAI_API_KEY=${NEARAI_API_KEY:-}
+      # NEAR AI tuning (optional); verification is always enforced.
+      - NEARAI_STREAM_MODE=${NEARAI_STREAM_MODE:-verified}
+      - NEARAI_PREWARM_MODELS=${NEARAI_PREWARM_MODELS:-}
+      - NEARAI_TEE_MODELS=${NEARAI_TEE_MODELS:-}
+      # Optional pin file. Mount it into the container and set this to the
+      # container-side path; a path that is not mounted fails closed.
+      - NEARAI_MEASUREMENTS_FILE=${NEARAI_MEASUREMENTS_FILE:-}
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main

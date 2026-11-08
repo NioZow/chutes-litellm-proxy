@@ -14,8 +14,16 @@ dependencies = [
     # Hardware-root attestation is mandatory: every verified evidence blob runs
     # Intel DCAP (dcap-qvl) and NVIDIA NRAS (nv-attestation-sdk). These are
     # always base dependencies and cannot be disabled.
-    "dcap-qvl>=0.6.3",
+    "dcap-qvl>=0.7.0",
     "nv-attestation-sdk>=2.7.3",
+    # Upstream NEAR AI verification SDK (attestation, TLS pinning, E2EE v3,
+    # response signatures). Pinned to the audited release candidate: re-audit
+    # before moving off 0.3.0rc1.
+    "nearai-inference-sdk==0.3.0rc1",
+    # Resolver hardening, not an import of ours: pulled in transitively via
+    # Pydantic's e-mail extra and affected by CVE-2026-114605. Declared
+    # explicitly so the floor is enforced on every resolution.
+    "dnspython>=2.9.0",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +31,7 @@ dependencies = [
 # dependencies. `uv sync --extra attestation` remains accepted for existing
 # scripts but does not enable or disable anything.
 attestation = [
-    "dcap-qvl>=0.6.3",
+    "dcap-qvl>=0.7.0",
     "nv-attestation-sdk>=2.7.3",
 ]
 
@@ -36,7 +44,9 @@ attestation = [
 [tool.uv]
 override-dependencies = [
     "cryptography>=49.0.0,<51.0",
-    "pyjwt>=2.13.0,<3.0",
+    # nearai-inference-sdk pins pyjwt[crypto]==2.15.1; keep the override on the
+    # same minor line so resolution cannot drift off the audited version.
+    "pyjwt>=2.15.1,<2.16",
     "requests>=2.32.3,<3.0",
     "urllib3>=2.0",
     # signxml==3.2.0 pins lxml==4.9.4, which predates cp313 wheels and has to

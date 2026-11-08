@@ -13,6 +13,9 @@
 #   *_API_KEY_PATH    File path containing a raw API key. The file is read and
 #                     forwarded into the container under the base name (e.g.
 #                     ANTHROPIC_API_KEY_PATH becomes ANTHROPIC_API_KEY).
+#   NEARAI_STREAM_MODE, NEARAI_PREWARM_MODELS, NEARAI_TEE_MODELS,
+#   NEARAI_MEASUREMENTS_FILE
+#                     Optional NEAR AI tuning; forwarded unchanged when set.
 #
 # Examples:
 #   LITELLM_BIND=127.0.0.1:4000 ./run.sh
@@ -53,6 +56,16 @@ while IFS='=' read -r env_key env_val; do
     printf '%s=%s\n' "$env_key" "$env_val" >>"$TMPENV"
   fi
 done < <(env)
+
+# NEAR AI tuning variables (the API key itself is handled by the generic
+# *_API_KEY / *_API_KEY_PATH loops above).  These only change caching, startup
+# prewarming, streaming presentation and the forced-TEE allowlist; none of them
+# weakens verification.
+for var in NEARAI_STREAM_MODE NEARAI_PREWARM_MODELS NEARAI_TEE_MODELS NEARAI_MEASUREMENTS_FILE; do
+  if [[ -n "${!var:-}" ]]; then
+    printf '%s=%s\n' "$var" "${!var}" >>"$TMPENV"
+  fi
+done
 
 exec $RUNTIME run --rm \
   --name "$CONTAINER_NAME" \

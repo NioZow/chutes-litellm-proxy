@@ -145,6 +145,18 @@ def fetch_mistral(api_key: str) -> list[str]:
     return sorted(m for m in all_ids if not any(m.startswith(p) for p in SKIP_MISTRAL))
 
 
+def fetch_nearai(api_key: str) -> list[dict]:
+    """Fetch NEAR AI chat models from the fixed Cloud API ``/v1/models`` URL.
+
+    The import is local so a deployment without ``NEARAI_API_KEY`` never pulls
+    the NEAR AI SDK into the config-generation path.  Chat filtering and
+    capability normalisation live in :mod:`chutes_litellm.near.models`.
+    """
+    from chutes_litellm.near.models import discover_models
+
+    return discover_models(api_key, timeout=TIMEOUT)
+
+
 # ---------------------------------------------------------------------------
 # Provider registry
 # ---------------------------------------------------------------------------
@@ -186,6 +198,10 @@ PROVIDERS: dict[str, dict] = {
         "env": "CHUTES_API_KEY",
         "fetch": fetch_chutes,
     },
+    "nearai": {
+        "env": "NEARAI_API_KEY",
+        "fetch": fetch_nearai,
+    },
 }
 
 
@@ -200,12 +216,12 @@ PROVIDERS: dict[str, dict] = {
 # keys matching `supports_([a-z]+)_reasoning_effort`).
 _REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 
-# OpenAI-style parameters Chutes models accept that LiteLLM would otherwise
-# strip (its custom-provider param list is a plain OpenAI list).  These are
-# declared per deployment so a client can actually send `reasoning_effort`
-# (DeepSeek thinking levels) or `chat_template_kwargs` / `thinking` (servers
-# that gate thinking behind a template flag, e.g. Gemma).
-_CHUTES_ALLOWED_OPENAI_PARAMS = (
+# OpenAI-style parameters Chutes and NEAR AI models accept that LiteLLM would
+# otherwise strip (its custom-provider param list is a plain OpenAI list).
+# These are declared per deployment so a client can actually send
+# `reasoning_effort` (DeepSeek thinking levels) or `chat_template_kwargs` /
+# `thinking` (servers that gate thinking behind a template flag, e.g. Gemma).
+_ALLOWED_OPENAI_PARAMS = (
     "reasoning_effort",
     "thinking",
     "reasoning",
@@ -293,19 +309,27 @@ def expand_wildcard(provider: str, template_entry: dict) -> list[dict]:
         for model in models:
             if isinstance(model, dict):
                 model_id = model.get("id", "")
+                # NEAR AI is served through its CustomLLM provider; the
+                # user-facing name stays `nearai/<id>`.
+                wire_provider = "nearai_e2ee" if provider == "nearai" else provider
                 litellm_params: dict = {
-                    "model": f"{provider}/{model_id}",
+                    "model": f"{wire_provider}/{model_id}",
                     "api_key": f"os.environ/{cfg['env']}",
                 }
                 # Let clients send thinking params LiteLLM would otherwise drop
                 # for a custom/OpenAI-compatible provider.
-                if provider == "chutes":
-                    litellm_params["allowed_openai_params"] = list(_CHUTES_ALLOWED_OPENAI_PARAMS)
+                if provider in {"chutes", "nearai"}:
+                    litellm_params["allowed_openai_params"] = list(_ALLOWED_OPENAI_PARAMS)
                 entry: dict = {
                     "model_name": f"{provider}/{model_id}",
                     "litellm_params": litellm_params,
                 }
-                info = _build_chutes_model_info(model)
+                if provider == "nearai":
+                    from chutes_litellm.near.models import normalized_model_info
+
+                    info = normalized_model_info(model)
+                else:
+                    info = _build_chutes_model_info(model)
                 if info:
                     entry["model_info"] = info
                 entries.append(entry)
@@ -320,7 +344,7 @@ def expand_wildcard(provider: str, template_entry: dict) -> list[dict]:
                     }
                 )
         return entries
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - one provider must never break config generation
         log(f"failed to fetch {provider} models ({exc}) — skipping")
         return []
 

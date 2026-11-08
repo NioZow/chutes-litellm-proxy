@@ -44,6 +44,20 @@ model_list:
       model: "chutes/*"
       api_key: "os.environ/CHUTES_API_KEY"
 
+  # NEAR AI models are served through the `nearai_e2ee` CustomLLM provider
+  # (attestation, TLS pinning, E2EE and receipt verification).  The
+  # user-facing model name remains `nearai/<model>`.
+  - model_name: "nearai/*"
+    litellm_params:
+      model: "nearai_e2ee/*"
+      api_key: "os.environ/NEARAI_API_KEY"
+
+litellm_settings:
+  # Never persist prompts or responses in LiteLLM logs/spend logs. NEAR AI
+  # responses are only authentic after receipt verification, and request
+  # material must not be retained; see docs/near-ai.md.
+  turn_off_message_logging: true
+
 general_settings:
   # no authentication required
   master_key: null

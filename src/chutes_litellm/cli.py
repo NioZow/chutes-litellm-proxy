@@ -35,11 +35,24 @@ import os
 import sys
 from collections.abc import Sequence
 
+import yaml
+
 from chutes_litellm import e2ee_litellm, get_logger
 from chutes_litellm.generate_config import generate
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 4000
+
+#: NEAR AI startup wiring.  The env names mirror
+#: :mod:`chutes_litellm.near.client`; they are duplicated rather than imported
+#: so a deployment without NEAR AI never imports the SDK at CLI startup.
+NEAR_API_KEY_ENV = "NEARAI_API_KEY"
+NEAR_PREWARM_MODELS_ENV = "NEARAI_PREWARM_MODELS"
+WORKER_STARTUP_HOOKS_ENV = "LITELLM_WORKER_STARTUP_HOOKS"
+NEAR_STARTUP_HOOK = "chutes_litellm.near.startup:prewarm"
+
+_NEAR_MODEL_PREFIX = "nearai/"
+_NEAR_WIRE_PREFIX = "nearai_e2ee/"
 
 _EPILOG = (
     "TEE/GPU attestation, Chutes end-to-end encryption and TLS verification are "
@@ -106,6 +119,97 @@ def _resolve_port(parser: argparse.ArgumentParser, cli_port: int | None) -> int:
         return int(raw_port)
     except ValueError:
         parser.error(f"invalid LITELLM_PORT value: {raw_port!r} (expected an integer)")
+
+
+def register_near() -> None:
+    """Register the ``nearai_e2ee`` CustomLLM provider.
+
+    The import is lazy so deployments without NEAR AI do not pay for importing
+    the NEAR AI SDK.  Registration does not require an API key and only mutates
+    LiteLLM's in-process provider map, so it must happen before serving in this
+    process (the single-worker invariant in :func:`_serve`).
+    """
+    from chutes_litellm.near.provider import register
+
+    register()
+
+
+def _read_generated_config(config_path: str) -> dict:
+    """Read a generated YAML config, returning ``{}`` when it is unusable."""
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            config = yaml.safe_load(handle)
+    except (OSError, yaml.YAMLError):
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def _strip_model_prefix(value: object, prefix: str) -> str | None:
+    """Return the model id after ``prefix``, or ``None`` when it does not match."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate.startswith(prefix):
+        return None
+    model_id = candidate[len(prefix):].strip()
+    if not model_id or model_id == "*":
+        return None
+    return model_id
+
+
+def _near_model_ids(config: dict) -> list[str]:
+    """Collect bare NEAR model ids from a generated config's ``model_list``."""
+    ids: list[str] = []
+    for entry in config.get("model_list") or []:
+        if not isinstance(entry, dict):
+            continue
+        params = entry.get("litellm_params")
+        wire_model = params.get("model") if isinstance(params, dict) else None
+        for value, prefix in ((entry.get("model_name"), _NEAR_MODEL_PREFIX), (wire_model, _NEAR_WIRE_PREFIX)):
+            model_id = _strip_model_prefix(value, prefix)
+            if model_id is not None:
+                ids.append(model_id)
+                break
+    return ids
+
+
+def _merge_model_ids(*groups: Sequence[str]) -> list[str]:
+    """Return non-empty, stripped, de-duplicated model ids in input order."""
+    unique: dict[str, None] = {}
+    for group in groups:
+        for raw in group:
+            if not isinstance(raw, str):
+                continue
+            model = raw.strip()
+            if model and model not in unique:
+                unique[model] = None
+    return list(unique)
+
+
+def _configure_near_startup(config_path: str) -> list[str]:
+    """Export the NEAR prewarm list and the LiteLLM worker startup hook.
+
+    The models come from the generated config (``nearai/<id>`` entries and/or
+    ``nearai_e2ee/<id>`` wire models), unioned with any pre-existing
+    ``NEARAI_PREWARM_MODELS`` value.  The hook is appended to any existing
+    ``LITELLM_WORKER_STARTUP_HOOKS`` exactly once, so prewarming runs in the
+    serving event loop rather than at CLI import time.
+
+    Returns:
+        The merged model ids; empty when the config declares no NEAR models.
+    """
+    config = _read_generated_config(config_path)
+    existing = (os.environ.get(NEAR_PREWARM_MODELS_ENV) or "").split(",")
+    models = _merge_model_ids(_near_model_ids(config), existing)
+    if not models:
+        return []
+
+    os.environ[NEAR_PREWARM_MODELS_ENV] = ",".join(models)
+    hooks = [hook.strip() for hook in (os.environ.get(WORKER_STARTUP_HOOKS_ENV) or "").split(",") if hook.strip()]
+    if NEAR_STARTUP_HOOK not in hooks:
+        hooks.append(NEAR_STARTUP_HOOK)
+    os.environ[WORKER_STARTUP_HOOKS_ENV] = ",".join(hooks)
+    return models
 
 
 def _serve(config_path: str, host: str, port: int) -> int:
@@ -224,6 +328,18 @@ def litellm_proxy(argv: Sequence[str] | None = None) -> int:
 
         register_custom_provider()
         logger.info("litellm_proxy: custom provider registered")
+
+    # NEAR AI is opt-in by key presence.  Registration and the prewarm hook
+    # must happen before serving so they live in this process/event loop.
+    if (os.environ.get(NEAR_API_KEY_ENV) or "").strip():
+        register_near()
+        logger.info("litellm_proxy: NEAR AI provider registered")
+        near_models = _configure_near_startup(output)
+        if near_models:
+            logger.info(
+                "litellm_proxy: NEAR AI startup prewarm scheduled for %d model(s)",
+                len(near_models),
+            )
 
     serve_args = ["--config", output, "--host", host, "--port", str(port)]
     logger.info("litellm_proxy: serving in-process (%s)", " ".join(serve_args))

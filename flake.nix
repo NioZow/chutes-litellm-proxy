@@ -1,5 +1,5 @@
 {
-  description = "LiteLLM proxy with the Chutes E2EE provider, built natively with Nix (no podman/docker).";
+  description = "LiteLLM proxy with the Chutes E2EE and NEAR AI providers, built natively with Nix (no podman/docker).";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -101,20 +101,34 @@
     dcapQvlWheel = pkgs: let
       wheels = {
         "linux-x86_64" = {
-          url = "https://files.pythonhosted.org/packages/df/e9/ba237d9da48fa794bbf257af17b1ec60bdc652813f16103ca27cde88eda4/dcap_qvl-0.6.3-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl";
-          hash = "sha256-OscqDvLrflkaxmZGs4maDgCKRr90PQdxbDTXVAIUwpU=";
+          url = "https://files.pythonhosted.org/packages/f4/3a/0e6d327b6c1965ddd61162faedc36f2991a29f20a693643eb6abea5d6c8f/dcap_qvl-0.7.1-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl";
+          hash = "sha256-BBGucSNPldd55CSg4h6T9SCY6blfCfGOogDUlaTJE44=";
         };
         "linux-aarch64" = {
-          url = "https://files.pythonhosted.org/packages/9d/ed/fa6bf937ca1c9d9c12c970c4c642730e764026b762014790f3086f2cefc9/dcap_qvl-0.6.3-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl";
-          hash = "sha256-e7RBF33RP3HqatasqCeVaoU1HQ5hZzztRqrBkhrFkmE=";
+          url = "https://files.pythonhosted.org/packages/f8/32/a62e54dd616d26a1d09bdf5d826b543b392b53b972dbc9ccc1479d0c6edc/dcap_qvl-0.7.1-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl";
+          hash = "sha256-WCsa+xzOeYFmnTBIDeoVKHUuj13pKyMjagjmNC/ltrw=";
         };
         "darwin-aarch64" = {
-          url = "https://files.pythonhosted.org/packages/ae/5c/5812299b6a8ee7ee7eb40a9f7cfa8f59e5b9e1bc06e1a4911aa3978f8087/dcap_qvl-0.6.3-cp38-abi3-macosx_11_0_arm64.whl";
-          hash = "sha256-Gha7i56yHyfhDxiGc1Nn2oLKgOM0446o30wNgMEhE3M=";
+          url = "https://files.pythonhosted.org/packages/7a/23/66d26adfc1b76827f92535cb865a91c92f42ec47d75e239a34eab2013910/dcap_qvl-0.7.1-cp38-abi3-macosx_11_0_arm64.whl";
+          hash = "sha256-CS1Ne455Czb1cd63EcgwHDIhm6SW0V8kD7W701otAeo=";
         };
       };
     in
       pkgs.fetchurl (wheels.${wheelPlatform pkgs});
+
+    # Pure-Python wheels (same bytes on every platform).  pyhpke is required by
+    # the NEAR AI SDK's E2EE v3 implementation and is not packaged in nixpkgs.
+    pyhpkeWheel = pkgs:
+      pkgs.fetchurl {
+        url = "https://files.pythonhosted.org/packages/04/31/2a0edff785b15d700199fed77186b3d070724cafd02fccfffb187e450d83/pyhpke-0.6.5-py3-none-any.whl";
+        hash = "sha256-6NeUck5DBT/gTolxvlUDMiXW2pBO/8dIswPOznY6Pzw=";
+      };
+
+    nearaiInferenceSdkWheel = pkgs:
+      pkgs.fetchurl {
+        url = "https://files.pythonhosted.org/packages/0f/06/23c71510ec27a705a2bf227b09ee07460e2b4f8020eabc028110db01dfa6/nearai_inference_sdk-0.3.0rc1-py3-none-any.whl";
+        hash = "sha256-/AMXg80BiKa4QhOpDIXpcX7HzQbj1sZGlDrD23ETqDw=";
+      };
 
     # Pure-Python NVIDIA wheels (same bytes on every platform).
     nvAttestationSdkWheel = pkgs:
@@ -168,11 +182,78 @@
 
       # --- hardware-root attestation (always included) ---
       # Intel DCAP quote verification (Rust abi3 wheel, no Python deps).
+      # 0.7.1 is the floor required by nearai-inference-sdk 0.3.0rc1.
       dcap-qvl = python.pkgs.buildPythonPackage rec {
         pname = "dcap-qvl";
-        version = "0.6.3";
+        version = "0.7.1";
         format = "wheel";
         src = dcapQvlWheel pkgs;
+        doCheck = false;
+      };
+
+      # --- NEAR AI ---
+      # HPKE (RFC 9180) is the only SDK dependency missing from nixpkgs.  It is
+      # pure Python; its `cryptography>=42,<52` pin is satisfied by nixpkgs'
+      # current release.
+      pyhpke = python.pkgs.buildPythonPackage rec {
+        pname = "pyhpke";
+        version = "0.6.5";
+        format = "wheel";
+        src = pyhpkeWheel pkgs;
+        propagatedBuildInputs = [python.pkgs.cryptography];
+        doCheck = false;
+      };
+
+      # Upstream NEAR AI verification SDK: Gateway/model attestation, TLS SPKI
+      # pinning, E2EE v3 and response signatures.  The wheel's metadata pins
+      # are stricter than nixpkgs (certifi>=2026.10.19, multidict>=6.9.1,
+      # sigstore>=4.5, pyjwt==2.15.1).  Those are packaging pins, not API
+      # contracts: the import chain uses only stable APIs (see the comment on
+      # pyjwt below), so `dontCheckRuntimeDeps` keeps the build honest about
+      # the difference instead of patching metadata.  Verification is not
+      # weakened in any way.
+      nearai-inference-sdk = python.pkgs.buildPythonPackage rec {
+        pname = "nearai-inference-sdk";
+        version = "0.3.0rc1";
+        format = "wheel";
+        src = nearaiInferenceSdkWheel pkgs;
+        propagatedBuildInputs =
+          [dcap-qvl pyhpke]
+          ++ (with python.pkgs; [
+            aiohttp
+            anthropic
+            bitarray
+            brotli
+            certifi
+            ckzg
+            cryptography
+            cytoolz
+            docstring-parser
+            eth-account
+            eth-utils
+            hexbytes
+            httpcore
+            httpx
+            multidict
+            openai
+            parsimonious
+            py-ecc
+            pyasn1
+            pycryptodome
+            pydantic
+            pyjwt
+            pynacl
+            rfc3161-client
+            rfc8785
+            rlp
+            ruamel-yaml
+            securesystemslib
+            sigstore
+            sigstore-models
+            sigstore-rekor-types
+            tuf
+          ]);
+        dontCheckRuntimeDeps = true;
         doCheck = false;
       };
 
@@ -247,6 +328,16 @@
         dontCheckRuntimeDeps = true;
         doCheck = false;
       };
+
+      # PyJWT: nixpkgs ships 2.13.0; the SDK metadata pins 2.15.1 and
+      # `uv.lock` keeps 2.15.1.  The NEAR AI SDK only uses long-stable PyJWT
+      # APIs (`PyJWKSet.from_dict`, `get_unverified_header`, `decode` and the
+      # `ExpiredSignatureError`/`InvalidSignatureError`/`PyJWTError` classes)
+      # for NVIDIA NRAS JWKS validation, all present and behaviourally
+      # identical in 2.13.0.  We therefore use nixpkgs' release rather than
+      # vendoring another wheel; nixpkgs 2.13.0 carries no known-vulnerability
+      # marker.  This is a packaging choice only: JWT signature verification
+      # still happens for every NRAS evidence check.
     in
       python.withPackages (
         ps:
@@ -263,6 +354,7 @@
             chutes-e2ee
             dcap-qvl
             nv-attestation-sdk
+            nearai-inference-sdk
           ]
       );
 
@@ -306,7 +398,7 @@
         '';
 
         meta = {
-          description = "LiteLLM proxy with the Chutes E2EE provider";
+          description = "LiteLLM proxy with the Chutes E2EE and NEAR AI providers";
           mainProgram = "litellm-proxy";
           license = lib.licenses.mit;
         };

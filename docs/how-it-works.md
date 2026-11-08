@@ -120,6 +120,9 @@ Important behaviours:
   clients use their own default.
 - Chutes entries also get `allowed_openai_params` so thinking/reasoning
   parameters are forwarded instead of dropped.
+- NEAR AI entries keep the user-facing `nearai/<id>` name but set
+  `litellm_params.model` to `nearai_e2ee/<id>`, the `CustomLLM` provider that
+  performs attestation and receipt verification.
 - Fixed (non-wildcard) entries are copied through unchanged, which is how a
   custom `chutes_e2ee/` model is configured.
 - An unknown wildcard provider is left as-is rather than expanded.
@@ -200,6 +203,25 @@ sequenceDiagram
     I-->>L: encrypted reply or SSE
     L-->>C: decrypted JSON or SSE
 ```
+
+## Request path for a NEAR AI request
+
+1. LiteLLM resolves `nearai/<id>` to `nearai_e2ee/<id>` and dispatches to
+   `NearCustomProvider`.
+2. The provider resolves the `NEARAI_API_KEY` and gets the process-wide
+   `NearRuntime` for that key.
+3. `runtime.verify_model(id)` returns the frozen TEE/routed mode. The warm path
+   is a memory lookup; a cold path bootstraps the pinned metadata client,
+   classifies the model, and runs the matching SDK `verify()`.
+4. The provider builds the OpenAI body, sends it through the E2EE client (TEE)
+   or the plain client (routed), and reads the completion.
+5. `verify_response(id)` fetches the signature and verifies it against the
+   evidence used to send. A TEE model must return `provider_tee`; a routed
+   model must return `gateway`.
+6. Only then does the provider translate the body/stream for LiteLLM. In
+   `verified` streaming, every chunk is buffered until step 5 succeeds.
+
+Full details and the trust boundaries are in [near-ai.md](near-ai.md).
 
 ## Attestation gate
 

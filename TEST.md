@@ -5,8 +5,10 @@ and how to add tests. Everything runs with `pytest`.
 
 - **Offline suite** — fast, hermetic, no network or credentials. A
   protocol-faithful mock speaks the real Chutes E2EE wire protocol.
-- **Live suite** — opt-in, hits the real Chutes API with a real key. Skipped
-  unless `CHUTES_LIVE_TEE=1` and `CHUTES_API_KEY` are set.
+- **Live suite** — opt-in, hits the real Chutes or NEAR AI API with a real key.
+  Chutes tests are skipped unless `CHUTES_LIVE_TEE=1` and `CHUTES_API_KEY` are
+  set; NEAR AI tests are skipped unless `NEARAI_LIVE=1` and a key/model pair is
+  set.
 
 ## Quick reference
 
@@ -20,6 +22,11 @@ uv run ruff check src tests scripts
 # Live: attestation + real encrypted invokes + real HTTP proxy
 CHUTES_LIVE_TEE=1 CHUTES_API_KEY=cpk_... \
   uv run pytest tests/test_live_attestation.py tests/test_live_proxy.py -v -s
+
+# Live: NEAR AI attestation, receipts, streaming, and the HTTP proxy
+NEARAI_LIVE=1 NEARAI_API_KEY=near-... \
+  NEARAI_TEE_MODEL=Qwen/Qwen3.8-27B NEARAI_ROUTED_MODEL=z-ai/glm-5.3-flash \
+  uv run pytest tests/test_live_near.py tests/test_near_perf.py -v -s
 ```
 
 ## Layout
@@ -36,6 +43,10 @@ CHUTES_LIVE_TEE=1 CHUTES_API_KEY=cpk_... \
 | `tests/test_cli.py` | offline | The CLI entry point: argparse `--config`/`--host`/`--port`, CLI-over-environment precedence, missing-config and invalid-port exit codes, `_serve` argument forwarding with `--num_workers 1`, click error mapping, and the regression that `e2ee_litellm.install()` runs before in-process serving. No server, uvicorn or network is started. |
 | `tests/test_live_attestation.py` | live | Real discovery + full evidence verification against a live `-TEE` chute: mandatory Intel DCAP, exact key/certificate bindings, a non-empty published measurement list, and mandatory NVIDIA NRAS GPU verification with GPU-count equality. Skips when the network or PCCS/NRAS is unreachable; there is no skip-by-disabling path. |
 | `tests/test_live_proxy.py` | live | Real custom-provider invokes, thinking visibility, a real in-process proxy reached over HTTP, and a gated request whose invoked `X-Instance-Id` is asserted to be in the verified set. |
+| `tests/test_near_*.py` | offline | NEAR AI mode classification, strict policy assertions, the `nearai_e2ee` provider (non-streaming, `verified` and `tail` streaming, receipt retry), discovery, startup prewarm, and runtime clients (coalescing, caches, timeouts, TLS pinning). |
+| `tests/test_near_measurements.py` | offline | Optional deployment measurement pinning: YAML/JSON schema and normalization, invalid-file fail-closed with no value leakage, exact-vs-wildcard selection, Gateway/model verifier codes, factory policy preservation, runtime wiring (both clients, bootstrap, invalid file, unset warning), and post-verification exact-model enforcement. |
+| `tests/test_near_perf.py` | offline + live | Offline regression gates for warm-path overhead, negative-cache cost/expiry and prewarm concurrency; opt-in live gates for cold/warm attestation, receipt overhead, streaming TTFT, and immediate response-byte release. |
+| `tests/test_live_near.py` | live | Real NEAR AI attestation for TEE and routed models, receipt kinds, both streaming modes, and a real in-process proxy request. |
 
 The fork adds hermetic hook tests at
 `chutes-e2ee-transport/tests/test_discovery_filter.py` (run from that repo or
@@ -131,6 +142,49 @@ dropped (`UnsupportedParamsError`). In the generated proxy config this is
 `litellm_params.allowed_openai_params`; in direct SDK calls pass
 `allowed_openai_params=[...]` or use `extra_body={...}`.
 
+## NEAR AI live suite
+
+### Requirements
+
+- `NEARAI_LIVE=1` — unlocks the live tests.
+- `NEARAI_API_KEY` — a real key.
+- `NEARAI_TEE_MODEL` — one model that verifies as true TEE
+  (`providerType == "vllm"` + attestation support).
+- `NEARAI_ROUTED_MODEL` — one Gateway-routed model.
+- Outbound access to `https://cloud-api.near.ai`, the DCAP collateral source,
+  and NVIDIA NRAS. Proxy variables are honoured.
+
+Missing credentials or model ids skip cleanly; nothing is downloaded or
+attested without an explicit opt-in.
+
+### What the live modules do
+
+`test_live_near.py`
+
+1. `test_live_tee_model_attestation` — `runtime.verify_model` returns `tee`; the
+   Gateway TLS binding is `attested`, TCB is `UpToDate`, there are no
+   advisories, every model report has `gpu_evidence == "verified"` and a signing
+   key.
+2. `test_live_tee_completion_receipt` — non-streaming completion through the
+   E2EE client verifies as `provider_tee`.
+3. `test_live_routed_model_attestation_and_receipt` — mode `routed`, Gateway
+   verified, `models == ()`, receipt `gateway`.
+4. `test_live_streaming_verified_and_tail` — both `NEARAI_STREAM_MODE` values
+   return content and terminate cleanly for the TEE model.
+5. `test_live_proxy_server` — boots `scripts/live_server.py` with a
+   `nearai/<id>` → `nearai_e2ee/<id>` config and POSTs
+   `/v1/chat/completions`.
+
+`test_near_perf.py` live gates (same env, run only when `NEARAI_LIVE=1`):
+
+- cold attestation under 10 s; warm verification makes no network calls,
+- receipt verification overhead p50 < 250 ms and p95 < 500 ms after excluding
+  model latency (measured directly around `verify_response`),
+- `verified` TTFT is at least the full completion time, and `tail` TTFT is
+  lower,
+- captured request/response bytes are `None`/empty immediately after
+  `verify_response`.
+
 ## Fixtures and isolation
 
 - `mock_server` (function scope) starts a fresh mock and monkeypatches the
@@ -168,4 +222,4 @@ dropped (`UnsupportedParamsError`). In the generated proxy config this is
 | ------ | ------- |
 | `scripts/proxy_test.py` | Ad-hoc smoke test against an already-running proxy. |
 | `scripts/verify_attestation.py` | Standalone attestation CLI for one model/chute. |
-| `scripts/live_server.py` | In-process proxy launcher used by the live server test. The deployed entry point also serves in-process; this launcher remains for tests that serve a pre-expanded config and can pick a free port. |
+| `scripts/live_server.py` | In-process proxy launcher used by the live server tests. Registers `chutes_e2ee` always and `nearai_e2ee` when `NEARAI_API_KEY` is set. The deployed entry point also serves in-process; this launcher remains for tests that serve a pre-expanded config and can pick a free port. |

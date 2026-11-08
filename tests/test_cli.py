@@ -8,11 +8,13 @@ recorders/fakes.
 from __future__ import annotations
 
 import inspect
+import os
 import sys
 
 import click
 import litellm
 import pytest
+import yaml
 
 from chutes_litellm import cli
 
@@ -68,6 +70,9 @@ def _clean_cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "LITELLM_HOST",
         "LITELLM_PORT",
         "CHUTES_CUSTOM_PROVIDER",
+        "NEARAI_API_KEY",
+        "NEARAI_PREWARM_MODELS",
+        "LITELLM_WORKER_STARTUP_HOOKS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -259,3 +264,120 @@ def test_serve_missing_litellm_returns_one(
     assert "litellm" in stderr
     assert "uv sync" in stderr
     assert "Traceback" not in stderr
+
+
+# ---------------------------------------------------------------------------
+# NEAR AI registration and startup prewarm wiring
+# ---------------------------------------------------------------------------
+
+
+def _write_generated(tmp_path, model_list: list[dict]) -> str:
+    path = tmp_path / "config.generated.yml"
+    path.write_text(yaml.safe_dump({"model_list": model_list}, sort_keys=False), encoding="utf-8")
+    return str(path)
+
+
+def _near_entry(model_id: str) -> dict:
+    return {
+        "model_name": f"nearai/{model_id}",
+        "litellm_params": {"model": f"nearai_e2ee/{model_id}"},
+    }
+
+
+def test_near_is_not_registered_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No key means no provider registration and no prewarm/hook mutation."""
+    recorder = _Recorder()
+    recorder.install(monkeypatch)
+    monkeypatch.setattr(cli, "register_near", lambda: recorder.order.append("register_near"))
+
+    cli.litellm_proxy([])
+
+    assert recorder.order == ["install", "serve"]
+    assert "NEARAI_PREWARM_MODELS" not in os.environ
+    assert "LITELLM_WORKER_STARTUP_HOOKS" not in os.environ
+
+
+def test_near_registers_and_wires_prewarm_before_serve(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """The provider and hook are installed before serving; ids are de-duplicated."""
+    recorder = _Recorder()
+    recorder.install(monkeypatch)
+    config_path = _write_generated(
+        tmp_path,
+        [
+            _near_entry("Qwen/Qwen3.8-27B"),
+            _near_entry("deepseek/deepseek-v4.1-flash"),
+            {"model_name": "chutes/x", "litellm_params": {"model": "chutes/x"}},
+        ],
+    )
+    monkeypatch.setattr(cli, "generate", lambda **_kwargs: config_path)
+    monkeypatch.setattr(cli, "register_near", lambda: recorder.order.append("register_near"))
+    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+    monkeypatch.setenv("NEARAI_PREWARM_MODELS", "existing/model, Qwen/Qwen3.8-27B")
+    monkeypatch.setenv(
+        "LITELLM_WORKER_STARTUP_HOOKS",
+        "other.module:hook, chutes_litellm.near.startup:prewarm",
+    )
+
+    cli.litellm_proxy([])
+
+    assert recorder.order == ["install", "register_near", "serve"]
+    assert recorder.serve_calls[0]["config_path"] == config_path
+    assert os.environ["NEARAI_PREWARM_MODELS"].split(",") == [
+        "Qwen/Qwen3.8-27B",
+        "deepseek/deepseek-v4.1-flash",
+        "existing/model",
+    ]
+    hooks = [hook.strip() for hook in os.environ["LITELLM_WORKER_STARTUP_HOOKS"].split(",")]
+    assert hooks.count(cli.NEAR_STARTUP_HOOK) == 1
+    assert "other.module:hook" in hooks
+
+
+def test_near_prewarm_reads_wire_model_names(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A config entry with only `litellm_params.model` is still discovered."""
+    recorder = _Recorder()
+    recorder.install(monkeypatch)
+    config_path = _write_generated(
+        tmp_path,
+        [{"model_name": "alias", "litellm_params": {"model": "nearai_e2ee/wire/model"}}],
+    )
+    monkeypatch.setattr(cli, "generate", lambda **_kwargs: config_path)
+    monkeypatch.setattr(cli, "register_near", lambda: recorder.order.append("register_near"))
+    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+
+    cli.litellm_proxy([])
+
+    assert os.environ["NEARAI_PREWARM_MODELS"] == "wire/model"
+    assert cli.NEAR_STARTUP_HOOK in os.environ["LITELLM_WORKER_STARTUP_HOOKS"].split(",")
+
+
+@pytest.mark.parametrize("config_kind", ["missing", "invalid", "no-near-models"])
+def test_near_invalid_or_empty_generated_config_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    config_kind: str,
+) -> None:
+    """Generated YAML that is absent, malformed or NEAR-free must not break startup."""
+    recorder = _Recorder()
+    recorder.install(monkeypatch)
+    if config_kind == "missing":
+        config_path = str(tmp_path / "does-not-exist.yml")
+    elif config_kind == "invalid":
+        config_path = str(tmp_path / "invalid.yml")
+        (tmp_path / "invalid.yml").write_text("model_list: [unclosed\n", encoding="utf-8")
+    else:
+        config_path = _write_generated(
+            tmp_path,
+            [{"model_name": "chutes/x", "litellm_params": {"model": "chutes/x"}}],
+        )
+    monkeypatch.setattr(cli, "generate", lambda **_kwargs: config_path)
+    monkeypatch.setattr(cli, "register_near", lambda: recorder.order.append("register_near"))
+    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+
+    cli.litellm_proxy([])
+
+    assert recorder.order == ["install", "register_near", "serve"]
+    assert "NEARAI_PREWARM_MODELS" not in os.environ
+    assert "LITELLM_WORKER_STARTUP_HOOKS" not in os.environ

@@ -21,6 +21,7 @@ you have, not with the file order.
 | How does startup work, how are models routed, and what happens on a `*-TEE` request? | [how-it-works.md](how-it-works.md) |
 | How is the prompt encrypted, what is the wire format, and what does encryption not hide? | [e2ee-encryption.md](e2ee-encryption.md) |
 | How does the proxy decide that an instance key belongs to genuine TDX/GPU hardware? | [attestation.md](attestation.md) |
+| How do `nearai/` models work, what is verified, and what is not? | [near-ai.md](near-ai.md) |
 | How do I run the offline or live test suites? | [TEST.md](../TEST.md) |
 | What is this project in one page? | [README.md](../README.md) |
 
@@ -64,6 +65,8 @@ always on. There is no endpoint, host, or verification override.
 | Native LiteLLM client swap | `src/chutes_litellm/e2ee_litellm.py` |
 | Self-contained `chutes_e2ee/` provider | `src/chutes_litellm/custom_provider.py` |
 | Attestation CLI | `src/chutes_litellm/verify.py`, `scripts/verify_attestation.py` |
+| NEAR AI runtime, policy, provider | `src/chutes_litellm/near/` |
+| NEAR AI discovery and startup hook | `src/chutes_litellm/near/models.py`, `src/chutes_litellm/near/startup.py` |
 | Protocol-faithful offline mock + tests | `tests/mock_chutes_server.py`, `tests/test_e2ee_litellm.py`, `tests/test_attestation.py` |
 
 > The `chutes-e2ee` transport is vendored from the fork

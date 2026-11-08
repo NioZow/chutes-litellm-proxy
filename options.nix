@@ -1,5 +1,5 @@
 # NixOS / home-manager module for the LiteLLM proxy (with the Chutes E2EE
-# provider).
+# and NEAR AI providers).
 #
 # The module is a function of a small record supplied by `flake.nix`, so the
 # exact same option set (and CLI wiring) is reused for three deployments:
@@ -28,6 +28,18 @@
 # file). The key is the exact environment variable name that the proxy will see.
 # Use *_PATH suffixes when you want the proxy to read the key from a file at
 # runtime; use the plain *_API_KEY name when you want to pass the key directly.
+#
+# NEAR AI keys follow the same convention:
+#
+#   NEARAI_API_KEY_PATH = config.age.secrets."litellm/nearai".path;
+#   # or
+#   NEARAI_API_KEY = "near-...";
+#
+# NEAR AI verification TTLs (attestation 900 s, failure 30 s, response 600 s) and
+# request timeouts (900 s hard, 10 s connect, 600 s read) are fixed in
+# `src/chutes_litellm/near/policy.py`. They are deliberately not options: none
+# of them can make verification weaker, and changing them must be a code
+# change that is reviewed with the security policy.
 {
   mkService,
   scope ? "system",
@@ -83,6 +95,18 @@
     // lib.optionalAttrs (cfg.dcapPccsUrl != null) {CHUTES_DCAP_PCCS_URL = cfg.dcapPccsUrl;}
     // lib.optionalAttrs (cfg.nvidiaNrasUrl != null) {CHUTES_NVIDIA_NRAS_URL = cfg.nvidiaNrasUrl;}
     // lib.optionalAttrs (cfg.logFile != null) {CHUTES_LOG_FILE = cfg.logFile;}
+    # NEAR AI. The API key is supplied through `apiKeys` (NEARAI_API_KEY or
+    # NEARAI_API_KEY_PATH), like every other provider.
+    // lib.optionalAttrs (cfg.nearaiPrewarmModels != []) {
+      NEARAI_PREWARM_MODELS = lib.concatStringsSep "," cfg.nearaiPrewarmModels;
+    }
+    // {NEARAI_STREAM_MODE = cfg.nearaiStreamMode;}
+    // lib.optionalAttrs (cfg.nearaiTeeModels != []) {
+      NEARAI_TEE_MODELS = lib.concatStringsSep "," cfg.nearaiTeeModels;
+    }
+    // lib.optionalAttrs (cfg.nearaiMeasurementsFile != null) {
+      NEARAI_MEASUREMENTS_FILE = toString cfg.nearaiMeasurementsFile;
+    }
     // lib.optionalAttrs (cfg.httpProxy != null) {
       HTTP_PROXY = cfg.httpProxy;
       http_proxy = cfg.httpProxy;
@@ -127,7 +151,7 @@
     };
 in {
   options.services.litellm = {
-    enable = lib.mkEnableOption "LiteLLM proxy (Chutes E2EE)";
+    enable = lib.mkEnableOption "LiteLLM proxy (Chutes E2EE and NEAR AI)";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -317,13 +341,67 @@ in {
         to disable file logging entirely (CHUTES_LOG_FILE).
       '';
     };
+
+    nearaiPrewarmModels = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      example = ["Qwen/Qwen3.8-27B" "z-ai/glm-5.3-flash"];
+      description = ''
+        NEAR AI model ids to attest at startup, comma-joined into
+        NEARAI_PREWARM_MODELS. The proxy's startup hook verifies each model with
+        the same strict policy as a request, bounded to four concurrent
+        verifications and a 60 s total prewarm budget. A leading "nearai/" or
+        "nearai_e2ee/" is stripped; bare upstream ids are canonical. Unset or
+        empty disables startup prewarming.
+      '';
+    };
+
+    nearaiStreamMode = lib.mkOption {
+      type = lib.types.enum ["verified" "tail"];
+      default = "verified";
+      description = ''
+        NEAR AI streaming mode (NEARAI_STREAM_MODE). <literal>"verified"</literal>
+        buffers the whole completion, verifies its receipt, and only then
+        releases content; <literal>"tail"</literal> streams live but withholds
+        the terminal chunk until the receipt verifies. There is no mode that
+        skips verification.
+      '';
+    };
+
+    nearaiTeeModels = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      example = ["Qwen/*" "deepseek-ai/*"];
+      description = ''
+        Exact NEAR AI model ids or globs that must verify as true TEE models,
+        comma-joined into NEARAI_TEE_MODELS. This can only increase strictness:
+        a matching model whose metadata reports Gateway-routed fails closed.
+        Bare upstream ids are canonical; a leading "nearai/" or "nearai_e2ee/"
+        is stripped. There is deliberately no option to force routed mode.
+      '';
+    };
+
+    nearaiMeasurementsFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        Optional local NEAR AI measurement pin file (NEARAI_MEASUREMENTS_FILE).
+        YAML or JSON pinning Gateway and TEE model os_image_hash, compose_hash
+        and app_compose_sha256; an exact model id wins over "*". When null, the
+        default (unpinned) provenance policy applies and a warning is logged.
+        An invalid file fails closed when the runtime is constructed (on the
+        first NEAR request or during startup prewarm, which logs it); NEAR
+        requests then fail with near.measurements.invalid. Pins only tighten
+        verification. See docs/near-ai.md for the schema.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable (
     (mkService (
       {
         name = "litellm";
-        description = "LiteLLM proxy (Chutes E2EE)";
+        description = "LiteLLM proxy (Chutes E2EE and NEAR AI)";
         command = "${cfg.package}/bin/litellm-proxy";
         inherit scope;
         environment = environment;

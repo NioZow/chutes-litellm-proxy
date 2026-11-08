@@ -11,6 +11,7 @@ what the live integration tests spawn.
 Environment:
 
 * ``CHUTES_API_KEY``          - real API key (required for completions)
+* ``NEARAI_API_KEY``          - when set, also registers ``nearai_e2ee``
 * ``CONFIG_FILE_PATH`` or ``--config`` - proxy YAML (model list)
 * ``CHUTES_E2EE_INSTALL``     - "1" to also apply ``e2ee_litellm.install()``
 * ``LITELLM_MASTER_KEY``      - optional; the config's ``master_key`` wins
@@ -56,6 +57,12 @@ def main() -> int:
     from chutes_litellm.custom_provider import register as register_custom_provider
 
     register_custom_provider()
+    # The NEAR AI provider is a lazily-imported CustomLLM; register it only when
+    # a key is present so a Chutes-only run never imports the NEAR SDK.
+    if (os.environ.get("NEARAI_API_KEY") or "").strip():
+        from chutes_litellm.near.provider import register as register_nearai_provider
+
+        register_nearai_provider()
     if _truthy(os.environ.get("CHUTES_E2EE_INSTALL")):
         from chutes_litellm import e2ee_litellm
 
