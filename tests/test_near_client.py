@@ -1001,7 +1001,7 @@ def test_get_runtime_resolves_env_and_rejects_missing_key(
     with pytest.raises(client.NearUnavailableError) as info:
         client.get_runtime()
     assert info.value.code == client.CODE_UNAVAILABLE_API_KEY
-    assert "NEARAI_API_KEY" not in str(info.value)
+    assert "NEAR_API_KEY" not in str(info.value)
 
     monkeypatch.setenv(client.API_KEY_ENV, "env-key")
     runtime = client.get_runtime()

@@ -50,7 +50,7 @@ model_list:
   - model_name: "nearai/*"
     litellm_params:
       model: "nearai_e2ee/*"
-      api_key: "os.environ/NEARAI_API_KEY"
+      api_key: "os.environ/NEAR_API_KEY"
 
 litellm_settings:
   # Never persist prompts or responses in LiteLLM logs/spend logs. NEAR AI

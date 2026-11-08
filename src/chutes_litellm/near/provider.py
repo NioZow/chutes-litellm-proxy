@@ -18,14 +18,14 @@ process-wide :class:`~chutes_litellm.near.client.NearRuntime`:
 The wire model id is the raw NEAR model id: a leading ``nearai_e2ee/`` or
 ``nearai/`` prefix is stripped.  The endpoint is fixed by
 :mod:`chutes_litellm.near.endpoints`; ``api_base`` is ignored.  The API key
-comes from ``NEARAI_API_KEY`` when set and non-empty (it is canonical and wins
+comes from ``NEAR_API_KEY`` when set and non-empty (it is canonical and wins
 over a request-level key so callers cannot create extra runtimes), otherwise
 from the ``api_key`` argument (including the literal
-``os.environ/NEARAI_API_KEY``).  It is never logged.
+``os.environ/NEAR_API_KEY``).  It is never logged.
 
 Environment:
 
-* ``NEARAI_API_KEY`` -- API key (not required at registration time).
+* ``NEAR_API_KEY`` -- API key (not required at registration time).
 * ``NEARAI_STREAM_MODE`` -- ``verified`` (default) or ``tail``.
 
 The proxy uses the async entry points.  The sync ones are a documented
@@ -138,11 +138,11 @@ def _clean_model(model: str) -> str:
 def _resolve_api_key(api_key: str | None, model: str) -> str:
     """Resolve the API key without ever logging or echoing it.
 
-    ``NEARAI_API_KEY`` is canonical: when it is set and non-empty it wins over
+    ``NEAR_API_KEY`` is canonical: when it is set and non-empty it wins over
     an explicit ``api_key`` (including a request-body key LiteLLM forwards),
     so caller-supplied keys cannot create arbitrary process-wide runtimes.
     Otherwise the explicit argument is used, including the literal
-    ``os.environ/NEARAI_API_KEY`` form LiteLLM emits.  Raises a LiteLLM
+    ``os.environ/NEAR_API_KEY`` form LiteLLM emits.  Raises a LiteLLM
     authentication error with a stable message when no key is available.
     """
     candidate: str | None = api_key

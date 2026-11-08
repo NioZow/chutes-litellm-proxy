@@ -183,7 +183,7 @@ def fetch_mistral(api_key: str) -> list[str]:
 def fetch_nearai(api_key: str) -> list[dict]:
     """Fetch NEAR AI chat models from the fixed Cloud API ``/v1/models`` URL.
 
-    The import is local so a deployment without ``NEARAI_API_KEY`` never pulls
+    The import is local so a deployment without ``NEAR_API_KEY`` never pulls
     the NEAR AI SDK into the config-generation path.  Chat filtering and
     capability normalisation live in :mod:`chutes_litellm.near.models`.
     """
@@ -234,7 +234,7 @@ PROVIDERS: dict[str, dict] = {
         "fetch": fetch_chutes,
     },
     "nearai": {
-        "env": "NEARAI_API_KEY",
+        "env": "NEAR_API_KEY",
         "fetch": fetch_nearai,
     },
 }

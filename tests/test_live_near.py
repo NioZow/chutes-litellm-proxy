@@ -1,9 +1,9 @@
 """Live end-to-end checks against the real NEAR AI Cloud API.
 
-Every test is skipped unless ``NEARAI_LIVE=1`` and ``NEARAI_API_KEY`` are set.
+Every test is skipped unless ``NEARAI_LIVE=1`` and ``NEAR_API_KEY`` are set.
 A TEE model and a routed model are selected explicitly:
 
-    NEARAI_LIVE=1 NEARAI_API_KEY=near-... \\
+    NEARAI_LIVE=1 NEAR_API_KEY=near-... \\
     NEARAI_TEE_MODEL=Qwen/Qwen3.8-27B \\
     NEARAI_ROUTED_MODEL=z-ai/glm-5.3-flash \\
         uv run pytest tests/test_live_near.py -v -s
@@ -39,7 +39,7 @@ from chutes_litellm.near.client import NearRuntime
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("NEARAI_LIVE"),
-    reason="set NEARAI_LIVE=1, NEARAI_API_KEY, NEARAI_TEE_MODEL and NEARAI_ROUTED_MODEL to run live NEAR checks",
+    reason="set NEARAI_LIVE=1, NEAR_API_KEY, NEARAI_TEE_MODEL and NEARAI_ROUTED_MODEL to run live NEAR checks",
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,7 +56,7 @@ def _require(env_name: str) -> str:
 
 
 def _credentials() -> tuple[str, str, str]:
-    key = _require("NEARAI_API_KEY")
+    key = _require("NEAR_API_KEY")
     tee = _require("NEARAI_TEE_MODEL")
     routed = _require("NEARAI_ROUTED_MODEL")
     return key, tee, routed
@@ -294,7 +294,7 @@ def _proxy_config(tee: str) -> dict:
                 "model_name": f"nearai/{tee}",
                 "litellm_params": {
                     "model": f"nearai_e2ee/{tee}",
-                    "api_key": "os.environ/NEARAI_API_KEY",
+                    "api_key": "os.environ/NEAR_API_KEY",
                 },
             }
         ],

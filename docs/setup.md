@@ -24,7 +24,7 @@ startup or attestation failure.
 - A `CHUTES_API_KEY` if you want `chutes/` models. Hardware attestation also
   needs outbound access to `https://api.chutes.ai`, `https://llm.chutes.ai`,
   the Intel/Phala PCCS used by DCAP, and NVIDIA NRAS.
-- A `NEARAI_API_KEY` if you want `nearai/` models. Attestation needs outbound
+- A `NEAR_API_KEY` if you want `nearai/` models. Attestation needs outbound
   access to `https://cloud-api.near.ai`, the DCAP collateral source, and NVIDIA
   NRAS.
 
@@ -140,7 +140,7 @@ CHUTES_API_KEY=cpk_... docker compose up --build
 - LiteLLM is published on host port `4000` (`4000:4000`).
 - The generated config is written to `./litellm-data/config.generated.yml`
   (`LITELLM_OUTPUT=/app/data/config.generated.yml`).
-- The Compose file forwards `CHUTES_API_KEY`, `NEARAI_API_KEY`,
+- The Compose file forwards `CHUTES_API_KEY`, `NEAR_API_KEY`,
   `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`,
   `META_API_KEY`, `MISTRAL_API_KEY`, `XAI_API_KEY`, and `PERPLEXITY_API_KEY`
   from your shell, plus the optional `NEARAI_STREAM_MODE`,
@@ -268,7 +268,7 @@ matching `*_API_KEY` variable. An explicitly set `*_API_KEY` wins.
 ```sh
 export ANTHROPIC_API_KEY_PATH=/run/secrets/anthropic
 export CHUTES_API_KEY_PATH=/run/secrets/chutes
-export NEARAI_API_KEY_PATH=/run/secrets/nearai
+export NEAR_API_KEY_PATH=/run/secrets/nearai
 ```
 
 `run.sh` reads the file on the host and writes the resolved value into a
@@ -336,7 +336,7 @@ model_list:
 ### NEAR AI
 
 `nearai/*` is expanded into `model_name: nearai/<id>` entries whose
-`litellm_params.model` is `nearai_e2ee/<id>`. Setting `NEARAI_API_KEY` is
+`litellm_params.model` is `nearai_e2ee/<id>`. Setting `NEAR_API_KEY` is
 enough; the provider is registered and (when models are configured) prewarmed
 at startup.
 
@@ -345,13 +345,13 @@ model_list:
   - model_name: "nearai/Qwen/Qwen3.8-27B"
     litellm_params:
       model: "nearai_e2ee/Qwen/Qwen3.8-27B"
-      api_key: "os.environ/NEARAI_API_KEY"
+      api_key: "os.environ/NEAR_API_KEY"
 ```
 
 Running as a service:
 
 ```sh
-export NEARAI_API_KEY=near-...
+export NEAR_API_KEY=near-...
 export NEARAI_STREAM_MODE=verified          # or tail
 export NEARAI_PREWARM_MODELS="Qwen/Qwen3.8-27B"
 export NEARAI_TEE_MODELS="Qwen/*"           # optional; can only add strictness
@@ -385,8 +385,8 @@ they are fixed at 900 s / 30 s / 600 s and a 900 s hard request timeout.
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
-| `NEARAI_API_KEY` | unset | API key for `nearai/` models. |
-| `NEARAI_API_KEY_PATH` | unset | File containing the key; an explicit key wins. |
+| `NEAR_API_KEY` | unset | API key for `nearai/` models. |
+| `NEAR_API_KEY_PATH` | unset | File containing the key; an explicit key wins. |
 | `NEARAI_STREAM_MODE` | `verified` | `verified` or `tail`; unknown values fail closed. |
 | `NEARAI_PREWARM_MODELS` | unset | Comma-separated ids to attest at startup. |
 | `NEARAI_TEE_MODELS` | unset | Comma-separated ids/globs that must verify as TEE. |
@@ -517,7 +517,7 @@ not a switch. 502 usually means a policy violation (TCB not `UpToDate`, a
 non-empty advisory list, missing GPU evidence or signing key, a wrong receipt
 kind, or a TEE/routed mode change); 503 means the mode could not be determined,
 attestation/bootstrap timed out, or the upstream transport failed. Check the
-log line's stable `near.*` code, that `NEARAI_API_KEY` is valid, that the host
+log line's stable `near.*` code, that `NEAR_API_KEY` is valid, that the host
 can reach `https://cloud-api.near.ai`, and — if you set `NEARAI_TEE_MODELS` —
 that every matching model really is TEE. There is no bypass. See
 [near-ai.md](near-ai.md).

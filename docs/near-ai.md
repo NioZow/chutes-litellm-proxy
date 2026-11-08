@@ -185,8 +185,8 @@ Rules:
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
-| `NEARAI_API_KEY` | unset | Canonical API key. Required for `nearai/` models and preferred over a request-level key. |
-| `NEARAI_API_KEY_PATH` | unset | File containing the key; read at startup. An explicit `NEARAI_API_KEY` wins. |
+| `NEAR_API_KEY` | unset | Canonical API key. Required for `nearai/` models and preferred over a request-level key. |
+| `NEAR_API_KEY_PATH` | unset | File containing the key; read at startup. An explicit `NEAR_API_KEY` wins. |
 | `NEARAI_STREAM_MODE` | `verified` | `verified` or `tail`; any other value fails closed. |
 | `NEARAI_PREWARM_MODELS` | unset | Comma-separated bare model ids to verify at startup. |
 | `NEARAI_TEE_MODELS` | unset | Comma-separated ids/globs that must verify as TEE. |
@@ -197,11 +197,11 @@ environment variables: 900 s attestation, 30 s failure and 600 s response
 lifetimes, the 900 s hard request timeout, and the 60 s total prewarm budget are
 fixed in `policy.py` and are not exposed as options.
 
-The API key comes from `NEARAI_API_KEY` when it is set and non-empty; this is
+The API key comes from `NEAR_API_KEY` when it is set and non-empty; this is
 canonical and wins over a request-level `api_key` (including one supplied in the
 request body), so callers cannot create additional process-wide runtimes. When
-`NEARAI_API_KEY` is unset or empty, the `api_key` LiteLLM resolves (including
-`os.environ/NEARAI_API_KEY`) is used. A caller-supplied key is never logged,
+`NEAR_API_KEY` is unset or empty, the `api_key` LiteLLM resolves (including
+`os.environ/NEAR_API_KEY`) is used. A caller-supplied key is never logged,
 never included in an error message, and is only sent after Gateway attestation
 succeeds for inference and mode-detection metadata; discovery is TLS-only and
 described below. `NEARAI_TEE_MODELS`, `NEARAI_PREWARM_MODELS`, and measurement
@@ -277,7 +277,7 @@ import os
 from chutes_litellm.near.client import NearRuntime
 
 async def main() -> None:
-    runtime = NearRuntime(api_key=os.environ["NEARAI_API_KEY"])
+    runtime = NearRuntime(api_key=os.environ["NEAR_API_KEY"])
     model = "Qwen/Qwen3.8-27B"
     mode = await runtime.verify_model(model)
     result = await runtime.client_for(mode).verify(model)
@@ -311,7 +311,7 @@ not mounted is treated as missing and fails closed.
 
 ### Startup prewarm
 
-When `NEARAI_API_KEY` and at least one `nearai/` model are configured, the CLI
+When `NEAR_API_KEY` and at least one `nearai/` model are configured, the CLI
 sets `LITELLM_WORKER_STARTUP_HOOKS=chutes_litellm.near.startup:prewarm`. The
 hook runs inside the serving event loop, so the process-wide runtime is bound to
 the correct loop. It verifies each model with the same policy as a request,
@@ -447,7 +447,7 @@ import os
 from chutes_litellm.near.client import NearRuntime
 
 async def main() -> None:
-    runtime = NearRuntime(api_key=os.environ["NEARAI_API_KEY"])
+    runtime = NearRuntime(api_key=os.environ["NEAR_API_KEY"])
     mode = await runtime.verify_model("Qwen/Qwen3.8-27B")
     print("mode:", mode)
     result = await runtime.client_for(mode).verify("Qwen/Qwen3.8-27B")

@@ -46,7 +46,7 @@ DEFAULT_PORT = 4000
 #: NEAR AI startup wiring.  The env names mirror
 #: :mod:`chutes_litellm.near.client`; they are duplicated rather than imported
 #: so a deployment without NEAR AI never imports the SDK at CLI startup.
-NEAR_API_KEY_ENV = "NEARAI_API_KEY"
+NEAR_API_KEY_ENV = "NEAR_API_KEY"
 NEAR_PREWARM_MODELS_ENV = "NEARAI_PREWARM_MODELS"
 WORKER_STARTUP_HOOKS_ENV = "LITELLM_WORKER_STARTUP_HOOKS"
 NEAR_STARTUP_HOOK = "chutes_litellm.near.startup:prewarm"

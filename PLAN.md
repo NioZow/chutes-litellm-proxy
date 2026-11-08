@@ -267,7 +267,7 @@ Configuration:
 - `pyproject.toml`: add `nearai-inference-sdk==0.3.0rc1`; bump `dcap-qvl>=0.7.0`; upgrade `PyJWT`; add `dnspython>=2.9.0`.
 - `config.template.yml`: add `nearai/*`.
 - `generate_config.py`: add the `nearai` provider; user-facing `nearai/<id>`, internal `nearai_e2ee/<id>`.
-- `cli.py`: register `nearai_e2ee` when `NEARAI_API_KEY` is present; keep in-process single-worker serving.
+- `cli.py`: register `nearai_e2ee` when `NEAR_API_KEY` is present; keep in-process single-worker serving.
 - `options.nix`: TTLs, stream mode, prewarm, measurements file, forced-TEE list.
 - `README.md`: provider table and security notes.
 - `docs/near-ai.md`: verification chain, mode policy, field coverage, limitations.
@@ -424,7 +424,7 @@ These are accepted for this provider and will be documented, not treated as bloc
 2. **Measurement pins:** provide known-good `os_image_hash` / `compose_hash` values, or ship without pins and log a warning.
 3. **Streaming default:** `verified` is proposed; confirm that buffering is acceptable, or choose `tail` as the default.
 4. **Nix:** approve packaging the SDK’s dependency graph, or ask for a minimal vendored subset.
-5. **Live validation:** provide a `NEARAI_API_KEY` and one TEE model plus one routed model for pre-merge validation.
+5. **Live validation:** provide a `NEAR_API_KEY` and one TEE model plus one routed model for pre-merge validation.
 
 ---
 

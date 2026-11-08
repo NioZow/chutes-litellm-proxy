@@ -31,9 +31,9 @@
 #
 # NEAR AI keys follow the same convention:
 #
-#   NEARAI_API_KEY_PATH = config.age.secrets."litellm/nearai".path;
+#   NEAR_API_KEY_PATH = config.age.secrets."litellm/nearai".path;
 #   # or
-#   NEARAI_API_KEY = "near-...";
+#   NEAR_API_KEY = "near-...";
 #
 # NEAR AI verification TTLs (attestation 900 s, failure 30 s, response 600 s) and
 # request timeouts (900 s hard, 10 s connect, 600 s read) are fixed in
@@ -95,8 +95,8 @@
     // lib.optionalAttrs (cfg.dcapPccsUrl != null) {CHUTES_DCAP_PCCS_URL = cfg.dcapPccsUrl;}
     // lib.optionalAttrs (cfg.nvidiaNrasUrl != null) {CHUTES_NVIDIA_NRAS_URL = cfg.nvidiaNrasUrl;}
     // lib.optionalAttrs (cfg.logFile != null) {CHUTES_LOG_FILE = cfg.logFile;}
-    # NEAR AI. The API key is supplied through `apiKeys` (NEARAI_API_KEY or
-    # NEARAI_API_KEY_PATH), like every other provider.
+    # NEAR AI. The API key is supplied through `apiKeys` (NEAR_API_KEY or
+    # NEAR_API_KEY_PATH), like every other provider.
     // lib.optionalAttrs (cfg.nearaiPrewarmModels != []) {
       NEARAI_PREWARM_MODELS = lib.concatStringsSep "," cfg.nearaiPrewarmModels;
     }

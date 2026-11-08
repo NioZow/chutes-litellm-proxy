@@ -106,7 +106,7 @@ if ATTESTATION_TTL_MS != int(ATTESTATION_TTL_SECONDS * 1000):  # pragma: no cove
     )
 
 #: Environment variable holding the API key used when none is passed explicitly.
-API_KEY_ENV = "NEARAI_API_KEY"
+API_KEY_ENV = "NEAR_API_KEY"
 
 #: Environment variable holding a comma-separated prewarm list.
 PREWARM_MODELS_ENV = "NEARAI_PREWARM_MODELS"
@@ -857,7 +857,7 @@ def get_runtime(
 ) -> NearRuntime:
     """Return the process-wide runtime for ``api_key``, creating it once.
 
-    The key comes from ``api_key`` or ``NEARAI_API_KEY``.  A missing or empty
+    The key comes from ``api_key`` or ``NEAR_API_KEY``.  A missing or empty
     key raises :class:`NearUnavailableError` with a stable code; Phase 3 maps
     that to an authentication error.  Nothing is instantiated at import time.
     """

@@ -37,7 +37,7 @@ def _safe_error_code(error: BaseException) -> str:
 async def prewarm() -> None:
     """Verify the configured NEAR AI models in the serving event loop.
 
-    No-op when ``NEARAI_API_KEY`` or ``NEARAI_PREWARM_MODELS`` is empty.  The
+    No-op when ``NEAR_API_KEY`` or ``NEARAI_PREWARM_MODELS`` is empty.  The
     batch uses the runtime's default 60 s total prewarm budget, so it can never
     hold LiteLLM readiness for the 900 s per-model hard timeout times the
     catalog size.  Any failure -- including runtime construction -- is caught

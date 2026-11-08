@@ -12,7 +12,7 @@ Environment=LITELLM_BIND=127.0.0.1:4000
 # Environment=OPENAI_API_KEY_PATH=/run/secrets/openai
 # Environment=GEMINI_API_KEY_PATH=/run/secrets/gemini
 # Environment=CHUTES_API_KEY_PATH=/run/secrets/chutes
-# Environment=NEARAI_API_KEY_PATH=/run/secrets/nearai
+# Environment=NEAR_API_KEY_PATH=/run/secrets/nearai
 # NEAR AI tuning (optional; verification itself is always on):
 # Environment=NEARAI_STREAM_MODE=verified
 # Environment=NEARAI_PREWARM_MODELS=Qwen/Qwen3.8-27B

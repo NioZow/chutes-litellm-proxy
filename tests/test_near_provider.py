@@ -256,7 +256,7 @@ def test_provider_id():
 
 
 def test_registration_is_idempotent_and_needs_no_api_key(monkeypatch):
-    monkeypatch.delenv("NEARAI_API_KEY", raising=False)
+    monkeypatch.delenv("NEAR_API_KEY", raising=False)
     provider.register()
     provider.register()
 
@@ -421,24 +421,24 @@ def test_enable_thinking_is_forwarded():
 
 
 def test_api_key_resolution(monkeypatch):
-    monkeypatch.setenv("NEARAI_API_KEY", "sk-from-env")
+    monkeypatch.setenv("NEAR_API_KEY", "sk-from-env")
     # The canonical environment key wins over an explicit/body key so callers
     # cannot grow the process-wide runtime map.
     assert provider._resolve_api_key("sk-explicit", MODEL) == "sk-from-env"
-    assert provider._resolve_api_key("os.environ/NEARAI_API_KEY", MODEL) == "sk-from-env"
+    assert provider._resolve_api_key("os.environ/NEAR_API_KEY", MODEL) == "sk-from-env"
     assert provider._resolve_api_key(None, MODEL) == "sk-from-env"
 
-    monkeypatch.delenv("NEARAI_API_KEY", raising=False)
+    monkeypatch.delenv("NEAR_API_KEY", raising=False)
     assert provider._resolve_api_key("sk-explicit", MODEL) == "sk-explicit"
 
     with pytest.raises(litellm.AuthenticationError) as excinfo:
         provider._resolve_api_key(None, MODEL)
-    assert "NEARAI_API_KEY" in str(excinfo.value)
+    assert "NEAR_API_KEY" in str(excinfo.value)
     assert "sk-" not in str(excinfo.value)
 
 
 def test_env_api_key_wins_over_a_body_key(monkeypatch):
-    monkeypatch.setenv("NEARAI_API_KEY", "sk-from-env")
+    monkeypatch.setenv("NEAR_API_KEY", "sk-from-env")
     runtime = FakeRuntime(mode="tee", sdk=FakeSDK(response=TrackingResponse(200, json=completion_body())))
     seen: list[str] = []
 
@@ -456,7 +456,7 @@ def test_env_api_key_wins_over_a_body_key(monkeypatch):
 
 
 def test_missing_api_key_uses_authentication_error(monkeypatch):
-    monkeypatch.delenv("NEARAI_API_KEY", raising=False)
+    monkeypatch.delenv("NEAR_API_KEY", raising=False)
     monkeypatch.setattr(provider, "get_runtime", lambda _key: pytest.fail("runtime must not be built"))
 
     async def run():

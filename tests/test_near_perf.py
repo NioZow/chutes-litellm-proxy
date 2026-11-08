@@ -181,15 +181,15 @@ def test_prewarm_stays_within_the_default_concurrency(harness: Harness) -> None:
 _LIVE = os.environ.get("NEARAI_LIVE")
 live = pytest.mark.skipif(
     not _LIVE,
-    reason="set NEARAI_LIVE=1, NEARAI_API_KEY and NEARAI_TEE_MODEL to run live NEAR checks",
+    reason="set NEARAI_LIVE=1, NEAR_API_KEY and NEARAI_TEE_MODEL to run live NEAR checks",
 )
 
 
 def _require_tee() -> tuple[str, str]:
-    key = (os.environ.get("NEARAI_API_KEY") or "").strip()
+    key = (os.environ.get("NEAR_API_KEY") or "").strip()
     tee = (os.environ.get("NEARAI_TEE_MODEL") or "").strip()
     if not key:
-        pytest.skip("NEARAI_API_KEY is not set")
+        pytest.skip("NEAR_API_KEY is not set")
     if not tee:
         pytest.skip("NEARAI_TEE_MODEL is not set")
     return key, tee

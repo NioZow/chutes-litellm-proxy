@@ -19,7 +19,7 @@ services:
       - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
       - XAI_API_KEY=${XAI_API_KEY:-}
       - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY:-}
-      - NEARAI_API_KEY=${NEARAI_API_KEY:-}
+      - NEAR_API_KEY=${NEAR_API_KEY:-}
       # NEAR AI tuning (optional); verification is always enforced.
       - NEARAI_STREAM_MODE=${NEARAI_STREAM_MODE:-verified}
       - NEARAI_PREWARM_MODELS=${NEARAI_PREWARM_MODELS:-}

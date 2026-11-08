@@ -24,7 +24,7 @@ CHUTES_LIVE_TEE=1 CHUTES_API_KEY=cpk_... \
   uv run pytest tests/test_live_attestation.py tests/test_live_proxy.py -v -s
 
 # Live: NEAR AI attestation, receipts, streaming, and the HTTP proxy
-NEARAI_LIVE=1 NEARAI_API_KEY=near-... \
+NEARAI_LIVE=1 NEAR_API_KEY=near-... \
   NEARAI_TEE_MODEL=Qwen/Qwen3.8-27B NEARAI_ROUTED_MODEL=z-ai/glm-5.3-flash \
   uv run pytest tests/test_live_near.py tests/test_near_perf.py -v -s
 ```
@@ -147,7 +147,7 @@ dropped (`UnsupportedParamsError`). In the generated proxy config this is
 ### Requirements
 
 - `NEARAI_LIVE=1` — unlocks the live tests.
-- `NEARAI_API_KEY` — a real key.
+- `NEAR_API_KEY` — a real key.
 - `NEARAI_TEE_MODEL` — one model that verifies as true TEE
   (`providerType == "vllm"` + attestation support).
 - `NEARAI_ROUTED_MODEL` — one Gateway-routed model.
@@ -222,4 +222,4 @@ attested without an explicit opt-in.
 | ------ | ------- |
 | `scripts/proxy_test.py` | Ad-hoc smoke test against an already-running proxy. |
 | `scripts/verify_attestation.py` | Standalone attestation CLI for one model/chute. |
-| `scripts/live_server.py` | In-process proxy launcher used by the live server tests. Registers `chutes_e2ee` always and `nearai_e2ee` when `NEARAI_API_KEY` is set. The deployed entry point also serves in-process; this launcher remains for tests that serve a pre-expanded config and can pick a free port. |
+| `scripts/live_server.py` | In-process proxy launcher used by the live server tests. Registers `chutes_e2ee` always and `nearai_e2ee` when `NEAR_API_KEY` is set. The deployed entry point also serves in-process; this launcher remains for tests that serve a pre-expanded config and can pick a free port. |

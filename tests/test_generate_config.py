@@ -91,7 +91,7 @@ def _near_model(**overrides) -> dict:
 
 def test_nearai_wildcard_emits_user_and_wire_model_names(monkeypatch):
     """NEAR entries expose `nearai/<id>` but route through `nearai_e2ee/<id>`."""
-    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+    monkeypatch.setenv("NEAR_API_KEY", "nk_test")
     monkeypatch.setitem(
         generate_config.PROVIDERS["nearai"],
         "fetch",
@@ -104,12 +104,12 @@ def test_nearai_wildcard_emits_user_and_wire_model_names(monkeypatch):
     entry = entries[0]
     assert entry["model_name"] == "nearai/Qwen/Qwen3.8-27B"
     assert entry["litellm_params"]["model"] == "nearai_e2ee/Qwen/Qwen3.8-27B"
-    assert entry["litellm_params"]["api_key"] == "os.environ/NEARAI_API_KEY"
+    assert entry["litellm_params"]["api_key"] == "os.environ/NEAR_API_KEY"
 
 
 def test_nearai_wildcard_allows_reasoning_params(monkeypatch):
     """Clients can send the same extra OpenAI params as for Chutes."""
-    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+    monkeypatch.setenv("NEAR_API_KEY", "nk_test")
     monkeypatch.setitem(
         generate_config.PROVIDERS["nearai"],
         "fetch",
@@ -126,7 +126,7 @@ def test_nearai_wildcard_allows_reasoning_params(monkeypatch):
 
 def test_nearai_wildcard_emits_normalized_model_info(monkeypatch):
     """Limits and capabilities are mapped from the NEAR catalog entry."""
-    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+    monkeypatch.setenv("NEAR_API_KEY", "nk_test")
     monkeypatch.setitem(
         generate_config.PROVIDERS["nearai"],
         "fetch",
@@ -147,8 +147,8 @@ def test_nearai_wildcard_emits_normalized_model_info(monkeypatch):
 
 
 def test_nearai_wildcard_skips_when_key_is_absent(monkeypatch):
-    """Without NEARAI_API_KEY the wildcard expands to nothing, like Chutes."""
-    monkeypatch.delenv("NEARAI_API_KEY", raising=False)
+    """Without NEAR_API_KEY the wildcard expands to nothing, like Chutes."""
+    monkeypatch.delenv("NEAR_API_KEY", raising=False)
     monkeypatch.setitem(
         generate_config.PROVIDERS["nearai"],
         "fetch",
@@ -160,7 +160,7 @@ def test_nearai_wildcard_skips_when_key_is_absent(monkeypatch):
 
 def test_nearai_wildcard_skips_on_discovery_error(monkeypatch):
     """Discovery errors are logged and skipped, not raised."""
-    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+    monkeypatch.setenv("NEAR_API_KEY", "nk_test")
     monkeypatch.setitem(
         generate_config.PROVIDERS["nearai"],
         "fetch",
@@ -265,7 +265,7 @@ def test_chutes_discovery_keeps_non_tee_chat_models():
 
 def test_nearai_wildcard_marks_only_own_tee_models(monkeypatch):
     """`owned_by: nearai` is TEE; proxied models only get `(NEAR)`."""
-    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+    monkeypatch.setenv("NEAR_API_KEY", "nk_test")
     monkeypatch.setitem(
         generate_config.PROVIDERS["nearai"],
         "fetch",

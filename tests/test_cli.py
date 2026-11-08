@@ -70,7 +70,7 @@ def _clean_cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "LITELLM_HOST",
         "LITELLM_PORT",
         "CHUTES_CUSTOM_PROVIDER",
-        "NEARAI_API_KEY",
+        "NEAR_API_KEY",
         "NEARAI_PREWARM_MODELS",
         "LITELLM_WORKER_STARTUP_HOOKS",
     ):
@@ -314,7 +314,7 @@ def test_near_registers_and_wires_prewarm_before_serve(
     )
     monkeypatch.setattr(cli, "generate", lambda **_kwargs: config_path)
     monkeypatch.setattr(cli, "register_near", lambda: recorder.order.append("register_near"))
-    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+    monkeypatch.setenv("NEAR_API_KEY", "nk_test")
     monkeypatch.setenv("NEARAI_PREWARM_MODELS", "existing/model, Qwen/Qwen3.8-27B")
     monkeypatch.setenv(
         "LITELLM_WORKER_STARTUP_HOOKS",
@@ -345,7 +345,7 @@ def test_near_prewarm_reads_wire_model_names(monkeypatch: pytest.MonkeyPatch, tm
     )
     monkeypatch.setattr(cli, "generate", lambda **_kwargs: config_path)
     monkeypatch.setattr(cli, "register_near", lambda: recorder.order.append("register_near"))
-    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+    monkeypatch.setenv("NEAR_API_KEY", "nk_test")
 
     cli.litellm_proxy([])
 
@@ -374,7 +374,7 @@ def test_near_invalid_or_empty_generated_config_does_not_crash(
         )
     monkeypatch.setattr(cli, "generate", lambda **_kwargs: config_path)
     monkeypatch.setattr(cli, "register_near", lambda: recorder.order.append("register_near"))
-    monkeypatch.setenv("NEARAI_API_KEY", "nk_test")
+    monkeypatch.setenv("NEAR_API_KEY", "nk_test")
 
     cli.litellm_proxy([])
 

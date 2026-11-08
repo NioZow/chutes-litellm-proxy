@@ -24,7 +24,7 @@ are mandatory and cannot be disabled.
 ```sh
 uv sync
 export CHUTES_API_KEY=cpk_...
-export NEARAI_API_KEY=near-...          # optional
+export NEAR_API_KEY=near-...          # optional
 uv run chutes-litellm-proxy --host 127.0.0.1 --port 4000
 ```
 
@@ -71,7 +71,7 @@ Only providers whose API key is set are expanded; the others are skipped.
 | Meta              | `META_API_KEY`       | `meta/`       |
 | Mistral           | `MISTRAL_API_KEY`    | `mistral/`    |
 | Chutes (E2EE + plain) | `CHUTES_API_KEY`     | `chutes/`     |
-| NEAR AI Cloud     | `NEARAI_API_KEY`     | `nearai/`     |
+| NEAR AI Cloud     | `NEAR_API_KEY`     | `nearai/`     |
 
 Chutes discovery keeps every chat model, so plain deployments are available
 alongside the `-TEE` ones. Only `-TEE` (or `confidential_compute`) models use
@@ -119,7 +119,7 @@ port exits with status `2`.
 | `NEARAI_MEASUREMENTS_FILE` | unset                 | Optional YAML/JSON pin file for Gateway + model builds     |
 
 An explicit `*_API_KEY` wins over its `*_API_KEY_PATH`. For NEAR AI,
-`NEARAI_API_KEY` is canonical and wins over a request-level key so callers
+`NEAR_API_KEY` is canonical and wins over a request-level key so callers
 cannot create additional runtimes. A leading `nearai/` or `nearai_e2ee/` is
 stripped from prewarm/forced-TEE model lists and from measurement-pin model
 keys; bare upstream ids are canonical. The generated config is written on every

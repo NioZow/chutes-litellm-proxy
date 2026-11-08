@@ -210,7 +210,7 @@ sequenceDiagram
 
 1. LiteLLM resolves `nearai/<id>` to `nearai_e2ee/<id>` and dispatches to
    `NearCustomProvider`.
-2. The provider resolves the `NEARAI_API_KEY` and gets the process-wide
+2. The provider resolves the `NEAR_API_KEY` and gets the process-wide
    `NearRuntime` for that key.
 3. `runtime.verify_model(id)` returns the frozen TEE/routed mode. The warm path
    is a memory lookup; a cold path bootstraps the pinned metadata client,
